@@ -2,47 +2,47 @@
 
 ## Overview
 
-This repository contains tools and scripts designed to automate the process of exporting data from a DynamoDB table into an S3 bucket in NDJSON format. Once the data is exported, it then uses it to replace a named Datasource in Tinybird.
+This repository contains tools and scripts designed to automate the process of exporting data from DynamoDB table(s) into an S3 bucket in NDJSON format. Once the data is exported, it then uses it to replace matching named Datasource(s) in Tinybird, e.g. `mytable` in DynamoDB will replace `mytable` in Tinybird.
 
 ## How it Works
 
-1. **DynamoDB Data Export**: The primary script, executed as an AWS Lambda function, scans the specified DynamoDB table.
-2. **Data Transformation**: The DynamoDB item is converted to plain JSON.
+1. **DynamoDB Data Export**: The primary script, executed as an AWS Lambda function, scans the specified DynamoDB table(s).
+2. **Data Transformation**: Each DynamoDB item is converted from DynamoDB notation to plain JSON.
 3. **NDJSON Creation**: The transformed data is accumulated into an NDJSON formatted file.
 4. **S3 Storage**: The NDJSON file is uploaded in chunks to a pre-defined S3 bucket.
-5. **Tinybird Integration**: With the data in S3, then pushed in a *replace* operation to Tinybird.
-
-The Lambda may be easily modified to handle multiple tables and Tinybird Datasources with the addition of a simple loop.
+5. **Tinybird Integration**: With the data in S3, then pushed in a **replace** operation to Tinybird.
 
 ## Setting Up
 
-This script is designed to be run as an AWS Lambda function. It requires a DynamoDB table, an S3 bucket, and a Tinybird Workspace. You will need rights to set IAM permissions in AWS and Admin the Tinybird Workspace if they are not already configured for you.
+This script is designed to be run as an AWS Lambda function. It requires at least one target DynamoDB table, an S3 bucket, and a Tinybird Workspace. You will need rights to set IAM permissions in AWS and Admin the Tinybird Workspace if they are not already configured for you.
 
 ### S3 Configuration
 
 In the S3 bucket:
 
 - Set your bucket policy from `bucket_policy.json`, update the placeholder values as required.
-- It is not necessary to open up the bucket to public access.
-
+- It is **not** necessary to open up the bucket to public access.
+- Your security posture target is that a pre-signed URL may be used to download the NDJSON file(s) from the bucket.
 
 ### Lambda Configuration
 In the Lambda Configuration:
 
-- Create an Environment Variable `TB_DS_ADMIN_TOKEN` with a valid Tinybird API token with rights to create and replace datasources.
 - Set the Runtime to `Python 3.11`.
+- Set the Timeout to suit your table size. For a table with 10K simple items, 30 seconds is observed to be sufficient; A table with 100K complex items took 5 mins.
+- Set the maximum Memory to suit your table size. 256MB was observed to be sufficient in our tests at 10K and 100K items.
 - Add the Access Policy in `lambda_policy.json` to the Lambda execution role, and update the placeholder values as required.
-
-Inside the `lambda_function.py`:
-
-- Set `DYNAMO_TABLE_NAME` to the name of your DynamoDB table.
-- Configure `DYNAMO_REGION` to match the AWS region of your DynamoDB instance.
-- Update `OUTPUT_BUCKET` with the name of your desired S3 bucket.
-- Assign `OUTPUT_KEY` with the path and filename where the NDJSON file will be stored in S3.
-- Update `TINYBIRD_TABLE_NAME` with the name you want for your Tinybird table.
-- Set `DOWNLOAD_URL_EXPIRATION` if you want to to be other than 30mins
+- Create the mandatory Environment Variables to control the Lambda's behavior
+    - `TB_DS_ADMIN_TOKEN` with a valid Tinybird API token with rights to replace datasources.
+    - `DDB_TABLES_TO_EXPORT` with a comma-separated list of DynamoDB tables to export.
+    - `S3_BUCKET_NAME` with the name of the S3 bucket to use for the NDJSON file(s).
+- You may also create these optional Environment Variables to control other behavior:
+    - `DDB_REGION` with the AWS region of your DynamoDB instance, if different from the Lambda's region.
+    - `TINYBIRD_API_ENDPOINT` with the Tinybird API endpoint to use, if different from the default of `api.tinybird.co`.
+    - `DOWNLOAD_URL_EXPIRATION` with the expiration time for the pre-signed URL, in seconds. Default is 30 minutes.
 
 ### Automate with a Cloud Trigger
+
+You can trigger the Lambda manually by submitting an empty event `{}`, but it is more useful to automate the process with a CloudWatch Event.
 
 To execute the Lambda function on a regular schedule:
 
@@ -58,11 +58,12 @@ We have provided some helper functions in the `/test` folder to generate a Dynam
 
 To verify everything works:
 
-1. **Create Test Table**: Use provided `create_table.sh` script to set up a `test_export` DynamoDB table.
+1. **Create Test Table**: Use provided `create_table.sh` script to set up a `export_test` DynamoDB table.
 2. **Generate Test Data**: Execute the `testdata.py` script to generate a subdir with about 10K items to be uploaded to DynamoDB.
 3. **Upload Test Data**: Use the `uploadchunks.sh` script to upload the test data to DynamoDB.
-4. **Configure the Lambda**: Set the `DYNAMO_TABLE_NAME` variable in the Lambda function to `test_export`.
-5. **Run Lambda**: Manually trigger the Lambda function. This will export the data from the test table to S3.
+4. **Configure the Lambda**: Set the `DDB_TABLES_TO_EXPORT` Environment Variable in the Lambda configuration to `export_test`.
+5. **Set S3 Bucket**: Set the `S3_BUCKET_NAME` Environment Variable in the Lambda configuration to the name of your S3 bucket.
+5. **Run Lambda**: Manually trigger the Lambda function with an empty test event `{}`. This will export the data from the test table to S3.
 6. **Tinybird Datasource Creation**: Download the NDJSON file from your S3 bucket, and import it into Tinybird using the UI to create the Datasource. This will allow Tinybird to infer the schema for the datasource to save you doing it manually.
 7. **Test the Lambda**: Now you can test the Lambda again to check that it replaces the Datasource as expected.
 

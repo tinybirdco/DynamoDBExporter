@@ -4,7 +4,7 @@
         {
             "Effect": "Allow",
             "Action": "dynamodb:Scan",
-            "Resource": "arn:aws:dynamodb:<region>:<id>:table/<table name>"
+            "Resource": "arn:aws:dynamodb:<region>:<id>:table/*"
         },
         {
             "Effect": "Allow",
