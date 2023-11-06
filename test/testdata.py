@@ -9,6 +9,14 @@ def random_string(length=10):
     letters = string.ascii_lowercase
     return ''.join(random.choice(letters) for _ in range(length))
 
+def maybe_none(chance_of_none=0.1):
+    """Return either a random string or None."""
+    return None if random.random() < chance_of_none else random_string(5)
+
+def maybe_empty_list(chance_of_empty=0.1):
+    """Return either an empty list or a list with random strings."""
+    return [] if random.random() < chance_of_empty else [{"S": random_string(5)} for _ in range(random.randint(1, 5))]
+
 def generate_test_data(output_directory, filename_prefix, num_records, records_per_file):
     if not os.path.exists(output_directory):
         os.makedirs(output_directory)
@@ -21,26 +29,28 @@ def generate_test_data(output_directory, filename_prefix, num_records, records_p
         count += 1
         data = {
             "id": {"S": random_string(10)},
-            "name": {"S": random_string(5)},
+            "name": {"S": maybe_none()},
             "age": {"N": str(random.randint(20, 60))},
             "decimal_value": {"N": str(Decimal(random.randint(100, 1000)) / 10)},
             "address": {
                 "M": {
-                    "street": {"S": random_string(10)},
-                    "city": {"S": random_string(5)},
-                    "zipcode": {"S": random_string(5)}
+                    "street": {"S": maybe_none()},
+                    "city": {"S": maybe_none()},
+                    "zipcode": {"S": maybe_none()}
                 }
             },
             "is_active": {"BOOL": random.choice([True, False])},
-            "purchases": {"L": [{"S": random_string(5)} for _ in range(random.randint(1, 5))]},
+            "purchases": {"L": maybe_empty_list()},
             "list_of_dicts": {"L": [
-                {"M": {"key1": {"S": random_string(5)}, "key2": {"N": str(random.randint(1, 10))}}},
-                {"M": {"key1": {"S": random_string(5)}, "key2": {"N": str(random.randint(1, 10))}}}
+                {"M": {"key1": {"S": maybe_none()}, "key2": {"N": str(random.randint(1, 10))}}},
+                {"M": {"key1": {"S": maybe_none()}, "key2": {"N": str(random.randint(1, 10))}}}
             ]},
             "dict_with_list": {"M": {
-                "list_key": {"L": [{"S": random_string(5)}, {"S": random_string(5)}]},
+                "list_key": {"L": maybe_empty_list()},
                 "other_key": {"N": str(random.randint(1, 10))}
-            }}
+            }},
+            # Including a field that might be null
+            "loans_range_min": {"NULL": True} if random.choice([True, False]) else {"N": str(random.randint(1000, 5000))}
         }
         output["export_test"].append({"PutRequest": {"Item": data}})
         
@@ -54,4 +64,4 @@ def generate_test_data(output_directory, filename_prefix, num_records, records_p
             file_count += 1
 
 # This will generate 10,000 records split over multiple files
-generate_test_data("chunks", "chunk", 10000, 25)  
+generate_test_data("chunks", "chunk", 10000, 25)

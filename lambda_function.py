@@ -101,8 +101,11 @@ def replace_tinybird_datasource(tinybird_table_name, output_bucket, output_key):
 def parse_dynamodb_attribute(attr):
     """Recursively parse DynamoDB attribute to a Python object."""
     if isinstance(attr, dict):
+        # Handle null type
+        if 'NULL' in attr and attr['NULL'] is True:
+            return ''  # Clickhouse prefers empty strings over NULL values
         # String type
-        if 'S' in attr:
+        elif 'S' in attr:
             return attr['S']
         # Number type
         elif 'N' in attr:
@@ -119,10 +122,11 @@ def parse_dynamodb_attribute(attr):
         # Map type (nested dictionary)
         elif 'M' in attr:
             return {k: parse_dynamodb_attribute(v) for k, v in attr['M'].items()}
-        # Handle other types if needed
         else:
-            return attr
+            # Fallback for unexpected types or structures
+            return {k: parse_dynamodb_attribute(v) for k, v in attr.items()}
     else:
+        # Not a dictionary, return as-is (this should not happen with standard DynamoDB structures)
         return attr
 
 def convert_dynamodb_item_to_plain_json(dynamodb_item):
