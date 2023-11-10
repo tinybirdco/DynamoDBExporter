@@ -12,6 +12,7 @@ DDB_TABLES_TO_EXPORT = os.environ.get('DDB_TABLES_TO_EXPORT', '')
 DDB_REGION = os.environ.get('DDB_REGION', '')
 S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME', '')
 DOWNLOAD_URL_EXPIRATION = os.environ.get('DOWNLOAD_URL_EXPIRATION', 1800)
+NULL_VALUE = os.environ.get('NULL_VALUE', '')  # Clickhouse prefers empty strings over NULL values
 
 # Validate mandatory environment variables
 if not TINYBIRD_API_KEY or not DDB_TABLES_TO_EXPORT or not S3_BUCKET_NAME:
@@ -103,7 +104,7 @@ def parse_dynamodb_attribute(attr):
     if isinstance(attr, dict):
         # Handle null type
         if 'NULL' in attr and attr['NULL'] is True:
-            return ''  # Clickhouse prefers empty strings over NULL values
+            return NULL_VALUE
         # String type
         elif 'S' in attr:
             return attr['S']
