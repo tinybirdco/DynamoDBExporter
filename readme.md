@@ -2,7 +2,9 @@
 
 ## Overview
 
-This repository contains tools and scripts designed to automate the process of exporting data from DynamoDB table(s) into an S3 bucket in NDJSON format. Once the data is exported, it then uses it to replace matching named Datasource(s) in Tinybird, e.g. `mytable` in DynamoDB will replace `mytable` in Tinybird.
+This repository contains tools and scripts designed to help in automating the process of exporting data from DynamoDB table(s) into an S3 bucket in NDJSON format. Once the data is exported, it then uses it to replace matching named Datasource(s) in Tinybird, e.g. `mytable` in DynamoDB will replace `mytable` in Tinybird. There is an additional test script to generate a DynamoDB table with some nested dummy data suitable for testing.
+
+This is provided as an example of how to automate the process of pushing data from DynamoDB into Tinybird. It is not intended to be a production-ready solution, but rather a starting point for your own implementation. Please note that this tool is not guaranteed nor officially supported by Tinybird.
 
 ## How it Works
 
@@ -14,7 +16,11 @@ This repository contains tools and scripts designed to automate the process of e
 
 ## Setting Up
 
-This script is designed to be run as an AWS Lambda function. It requires at least one target DynamoDB table, an S3 bucket, and a Tinybird Workspace. You will need rights to set IAM permissions in AWS and Admin the Tinybird Workspace if they are not already configured for you.
+This script is designed to be run as an AWS Lambda function. It requires at least one target DynamoDB table, an S3 bucket, and a Tinybird Workspace. 
+
+You will need rights to set IAM permissions in AWS and Admin the Tinybird Workspace if they are not already configured for you.
+
+You are advised to run the Lambda at least once to test it is writing expected output to your S3 file. You can then download that file and import it into Tinybird to create the Datasource with your preferred schema using the schema inference tooling. Once you have done this, you can then configure the Lambda to regularly replace the Datasource in Tinybird automatically.
 
 ### S3 Configuration
 
@@ -22,7 +28,7 @@ In the S3 bucket:
 
 - Set your bucket policy from `bucket_policy.json`, update the placeholder values as required.
 - It is **not** necessary to open up the bucket to public access.
-- Your security posture target is that a pre-signed URL may be used to download the NDJSON file(s) from the bucket.
+- Your security posture is that a time-limited pre-signed URL may be used to download the NDJSON file(s) from the bucket, this signed URI will be pushed to Tinybird as using an API command which will then launch an ingest job to load the data into the Datasource.
 
 ### Lambda Configuration
 In the Lambda Configuration:
@@ -39,6 +45,7 @@ In the Lambda Configuration:
     - `DDB_REGION` with the AWS region of your DynamoDB instance, if different from the Lambda's region.
     - `TINYBIRD_API_ENDPOINT` with the Tinybird API endpoint to use, if different from the default of `api.tinybird.co`.
     - `DOWNLOAD_URL_EXPIRATION` with the expiration time for the pre-signed URL, in seconds. Default is 30 minutes.
+    - `NULL_VALUE` with the value to use for null values in the NDJSON file. Default is an empty string as ClickHouse prefers this to `null` values.
 
 ### Automate with a Cloud Trigger
 
