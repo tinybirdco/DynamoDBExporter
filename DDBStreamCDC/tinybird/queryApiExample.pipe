@@ -1,0 +1,19 @@
+TOKEN "latest_export_by_key_endpoint_read_8719" READ
+
+NODE endpoint
+SQL >
+
+    %
+    SELECT 
+      JSONExtractString(Keys, 'id') as id, 
+      JSONExtractUInt(NewImage, 'age') as user_age,
+      toDateTime(ApproximateCreationDateTime) as ApproximateCreationDateTime,
+      eventSource, eventName
+    FROM mat_export_test FINAL
+    {% if defined(ddbid) %}
+    WHERE id = {{String(ddbid)}}
+    {% end %}
+    LIMIT {{Int32(page_size, 100)}}
+    OFFSET {{Int32(page, 0) * Int32(page_size, 100)}}
+
+

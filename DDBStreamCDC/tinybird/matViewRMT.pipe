@@ -1,0 +1,9 @@
+NODE dedupe
+SQL >
+
+    SELECT * FROM export_test_stream
+
+TYPE materialized
+DATASOURCE mat_export_test
+
+
