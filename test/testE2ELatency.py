@@ -13,6 +13,11 @@ TABLE_NAME = "export_test"  # Replace with your DynamoDB table name
 TINYBIRD_ENDPOINT = "https://api.tinybird.co/v0/pipes/latest_export_by_key.json"
 TINYBIRD_TOKEN = ""
 TEST_KEY = "user_age"
+POLL_INTERVAL = .5  # seconds
+MAX_WAIT = 300  # 5 minutes
+
+if TINYBIRD_TOKEN == "":
+    raise ValueError("Please provide a valid Tinybird token")
 
 # Initialize DynamoDB client
 dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
@@ -27,12 +32,16 @@ def get_random_key_from_tinybird():
         if data:
             random_item = random.choice(data)
             return random_item['id'], random_item['ApproximateCreationDateTime'], random_item[TEST_KEY]
+    else:
+        print(f"Failed to fetch data from Tinybird: {response.status_code} - {response.text}")
     return None, None, None
 
-def update_dynamodb_item(key_value):
+def update_dynamodb_item(key_value, starting_value):
     """Update a DynamoDB item with a new test key."""
     timestamp = datetime.now(timezone.utc)
-    new_age = random.randint(20, 60)
+    new_age = starting_value
+    while new_age == starting_value:
+        new_age = random.randint(10, 100)
     
     try:
         response = table.update_item(
@@ -74,27 +83,25 @@ def measure_latency():
         print("Failed to get a random key from Tinybird")
         return None
     
-    print(f"Selected key: {key_value} with initial timestamp: {initial_timestamp} and initial age of {starting_value}")
+    print(f"Selected key: {key_value} with initial timestamp: {initial_timestamp} and initial value of {starting_value}")
     
     # Parse the initial_timestamp string to a datetime object
     initial_datetime = datetime.strptime(initial_timestamp, "%Y-%m-%d %H:%M:%S")
     
     print("Updating DynamoDB item...")
-    update_timestamp, new_age = update_dynamodb_item(key_value)
+    update_timestamp, new_value = update_dynamodb_item(key_value, starting_value)
     if update_timestamp is None:
         print("Failed to update DynamoDB item. Aborting latency test.")
         return None
     
     update_time_str = format_timestamp(update_timestamp)
-    print(f"Item updated at: {update_time_str} with new age: {new_age}")
+    print(f"Item updated at: {update_time_str} with new value: {new_value}")
     
     start_time = time.time()
-    poll_interval = 1  # seconds
-    max_wait_time = 300  # 5 minutes
     
     print("Polling Tinybird for update...")
     poll_count = 0
-    while time.time() - start_time < max_wait_time:
+    while time.time() - start_time < MAX_WAIT:
         poll_count += 1
         current_time = format_timestamp(time.time())
         print(f"Poll {poll_count} at {current_time}")
@@ -107,7 +114,7 @@ def measure_latency():
             
             tinybird_datetime = datetime.strptime(tinybird_timestamp, "%Y-%m-%d %H:%M:%S")
             
-            if tinybird_datetime > initial_datetime and tinybird_age == new_age:
+            if tinybird_datetime > initial_datetime and tinybird_age == new_value:
                 end_time = time.time()
                 latency = end_time - start_time
                 print(f"Update detected in Tinybird after {latency:.2f} seconds")
@@ -116,9 +123,9 @@ def measure_latency():
         else:
             print("No data returned from Tinybird for this key")
         
-        time.sleep(poll_interval)
+        time.sleep(POLL_INTERVAL)
     
-    print(f"Timeout: Update not detected in Tinybird within {max_wait_time} seconds")
+    print(f"Timeout: Update not detected in Tinybird within {MAX_WAIT} seconds")
     return None
 
 def get_tinybird_data(key_value):

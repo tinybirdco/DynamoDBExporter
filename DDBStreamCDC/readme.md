@@ -2,18 +2,22 @@
 
 This README outlines the process of setting up a Change Data Capture (CDC) system from Amazon DynamoDB to Tinybird using AWS Lambda.
 
-Once configured the Lambda will automatically forward any updates to the DynamoDB table to the specified Tinybird Datasource.
+Once configured, the Lambda will automatically forward any updates to the included DynamoDB tables to Tinybird Datasources matching the same name with an optional prefix. The Tinybird Datasource will be automatically created with an appropriate schema. You can create a DynamoDB Snapshot to (re)initialize the export, and the Streams configuration will keep it up to date.
 
 ## Limitations
 
 The DynamoDB Streams service only keeps events for 24hours. If this service is somehow down for longer than that, your data will be stale and you should create a new Snapshot to reinitialize the Tinybird table. Some users choose to do this nightly as a precautionary measure.
 
 ## 0. Setup DynamoDB Table
-1. Your DynamoDB table needs to be configured with both DDBStreams activated, and point-in-time recovery to allow Snapshots to be created.
+1. Your DynamoDB table needs to be configured with both DDBStreams activated to send changes, and point-in-time recovery to allow Snapshots to be created.
 2. DDBStreams should be turned on before you do an initial snapshot, otherwise you may miss any changes between the snapshot completion and streams activation.
 
+## 1. Create a Bucket for your Snapshots
+You need a Bucket that the Snapshots can be stored it, it can be a separate bucket or you can use a prefix in the Snapshot configuration (recommended anyway) to keep the data exports contained to one area. This bucket is not exposed publicly and is only used to get 'free' snapshots from DynamoDB without using a full Scan.
 
-## 1. Create IAM Role
+1. Create a bucket, retain the name for use in later configurations.
+
+## 2. Create IAM Role
 
 1. Navigate to IAM in AWS Console.
 2. Create a new role for Lambda.
@@ -59,7 +63,7 @@ The DynamoDB Streams service only keeps events for 24hours. If this service is s
 ```
 4. Update the policy with your specific S3 bucket name.
 
-## 2. Create Lambda Function
+## 3. Create Lambda Function
 
 1. Go to AWS Lambda and create a new function.
 2. Name it "TinyDynamoCDC".
@@ -73,11 +77,11 @@ The DynamoDB Streams service only keeps events for 24hours. If this service is s
 ### Configure Environment Variables
 In the Lambda configuration, add these environment variables:
 
-1. TB_DS_ADMIN_TOKEN: Your Tinybird Data Source Admin Token (Create this in Tinybird)
-2. TB_DS_NAME: The name of your target table in Tinybird
-3. TB_API_ENDPOINT: The URL of your Tinybird Workspace, if different than the default. You can easily find this in the Add Datasource > Events API example in the UI.
+1. TB_DS_ADMIN_TOKEN: Your Tinybird Data Source Admin Token (Create this in Tinybird). It requires the `DATASOURCE:APPEND` and `DATASOURCE:CREATE` scopes.
+2. TB_DS_PREFIX: The prefix to apply to the DynamoDB table names when creating them in Tinybird, it defaults to `ddb_`
+3. TB_API_ENDPOINT: The URL of your Tinybird Workspace, if different than the default. You can easily find this in the Add Datasource > Events API example in the UI. It defaults to `https://api.tinybird.co/v0/`
 
-## 3. Add S3 Trigger
+## 4. Add S3 Trigger
 
 1. In the Lambda function, add a new trigger.
 2. Choose S3 as the source.
@@ -87,7 +91,7 @@ In the Lambda configuration, add these environment variables:
 6. Add the prefix `DDBStreamCDC` to collect all your exports into a common folder. Note that this prefix is also used in the createSnapshot.sh script if you want to change it.
 7. Set the Destination as your Lambda Function ARN.
 
-## 4. Add DynamoDB Trigger
+## 5. Add DynamoDB Trigger
 
 1. Add another trigger to the Lambda function.
 2. Choose DynamoDB as the source.
@@ -97,13 +101,6 @@ In the Lambda configuration, add these environment variables:
     * Batch window: 5 seconds
     * Retry attempts: 5
     * Split batch on error: Yes
-
-## 5. Create Tinybird Landing Table
-
-1. In Tinybird, use the landingSchema.datasource to create a new table.
-2. Rename this table to match the TB_DS_NAME you set in the Lambda environment variables.
-3. You can additionally use the matViewRMT and Target Pipe/Datasource to create your Upserted table.
-4. you can then also use the querApiExample Pipe to get the latest values as an REST API Endpoint.
 
 ## 6. Set Up Alerting
 
