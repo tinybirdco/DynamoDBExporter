@@ -91,16 +91,18 @@ In the Lambda configuration, add these environment variables:
 6. Add the prefix `DDBStreamCDC` to collect all your exports into a common folder. Note that this prefix is also used in the createSnapshot.sh script if you want to change it.
 7. Set the Destination as your Lambda Function ARN.
 
-## 5. Add DynamoDB Trigger
+## 5. Add DynamoDB Trigger(s)
 
 1. Add another trigger to the Lambda function.
 2. Choose DynamoDB as the source.
 3. Select your DynamoDB table.
 4. Configure the following settings:
     * Batch size: 100
+    * Starting Position: Trim Horizon
     * Batch window: 5 seconds
     * Retry attempts: 5
     * Split batch on error: Yes
+5. Repeat for each source DynamoDB Table to be replicated.
 
 ## 6. Set Up Alerting
 
