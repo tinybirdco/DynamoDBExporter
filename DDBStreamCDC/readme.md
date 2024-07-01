@@ -83,7 +83,9 @@ In the Lambda configuration, add these environment variables:
 2. Choose S3 as the source.
 3. Select your S3 bucket.
 4. Set the event type to "All object create events".
-5. Add .gz as the suffix.
+5. Add .gz as the suffix so non-data files do not trigger the lambda
+6. Add the prefix `DDBStreamCDC` to collect all your exports into a common folder. Note that this prefix is also used in the createSnapshot.sh script if you want to change it.
+7. Set the Destination as your Lambda Function ARN.
 
 ## 4. Add DynamoDB Trigger
 
