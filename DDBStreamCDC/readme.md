@@ -80,6 +80,7 @@ In the Lambda configuration, add these environment variables:
 1. TB_DS_ADMIN_TOKEN: Your Tinybird Data Source Admin Token (Create this in Tinybird). It requires the `DATASOURCE:APPEND` and `DATASOURCE:CREATE` scopes.
 2. TB_DS_PREFIX: The prefix to apply to the DynamoDB table names when creating them in Tinybird, it defaults to `ddb_`
 3. TB_API_ENDPOINT: The URL of your Tinybird Workspace, if different than the default. You can easily find this in the Add Datasource > Events API example in the UI. It defaults to `https://api.tinybird.co/v0/`
+4. TB_SKIP_TABLE_CHECK: You can set this to True if you want the script to skip checking if the target Tinybird Datasource already exists. The script will create it with a good schema by default, but once it's running you may want to set this to skip the extra API call every invocation.
 
 ## 4. Add S3 Trigger
 
