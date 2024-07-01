@@ -1,0 +1,34 @@
+{
+    "Records": [
+        {
+            "eventID": "f202850b167f5bdc4cb6daa43f2930a4",
+            "eventName": "INSERT",
+            "eventVersion": "1.1",
+            "eventSource": "aws:dynamodb",
+            "awsRegion": "eu-west-2",
+            "dynamodb": {
+                "ApproximateCreationDateTime": 1719866910,
+                "Keys": {
+                    "id": {
+                        "S": "tbvlzhgbqi"
+                    }
+                },
+                "NewImage": {
+                    "update_timestamp": {
+                        "S": "2024-07-01T20:48:28.917668+00:00"
+                    },
+                    "id": {
+                        "S": "tbvlzhgbqi"
+                    },
+                    "age": {
+                        "N": "98"
+                    }
+                },
+                "SequenceNumber": "1527400000000022012868401",
+                "SizeBytes": 77,
+                "StreamViewType": "NEW_AND_OLD_IMAGES"
+            },
+            "eventSourceARN": "arn:aws:dynamodb:eu-west-2:REDACTED:table/export_test/stream/2024-07-01T12:REDACTED"
+        }
+    ]
+}

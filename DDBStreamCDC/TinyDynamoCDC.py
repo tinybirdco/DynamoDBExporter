@@ -1,6 +1,7 @@
 import os
 import json
 import gzip
+import uuid
 from io import BytesIO
 from datetime import datetime
 from logging import INFO, getLogger
@@ -10,8 +11,10 @@ import boto3
 from boto3.dynamodb.types import TypeDeserializer, Binary
 from decimal import Decimal
 
-s3 = boto3.client('s3')
 getLogger().setLevel(os.environ.get("LOGGING_LEVEL") or INFO)
+s3 = boto3.client('s3')
+dynamodb = boto3.client('dynamodb')
+deserializer = TypeDeserializer()
 
 TINYBIRD_API_KEY = os.environ['TB_DS_ADMIN_TOKEN']
 TINYBIRD_API_ENDPOINT = os.environ.get('TB_API_ENDPOINT', 'https://api.tinybird.co/v0/')
@@ -20,9 +23,8 @@ TINYBIRD_SKIP_TABLE_CHECK = os.environ.get('TB_SKIP_TABLE_CHECK') or False
 BATCH_SIZE = os.environ.get('TB_BATCH_SIZE') or 250
 
 REGION = os.environ['AWS_REGION']
-MAX_PAYLOAD_SIZE = 5 * 1024 * 1024  # 5MB
-
-deserializer = TypeDeserializer()
+MAX_PAYLOAD_SIZE = 5 * 1024 * 1024  # 5MB.
+TABLE_KEY_SCHEMAS = {}
 
 class DDBEncoder(json.JSONEncoder):
     def default(self, o):
@@ -74,6 +76,22 @@ def extract_table_name_from_s3_key(key):
     getLogger().warning(f"Unable to extract table name from S3 key: {key}")
     return None
 
+def get_table_key_schema(table_name):
+    if table_name in TABLE_KEY_SCHEMAS:
+        return TABLE_KEY_SCHEMAS[table_name]
+    
+    try:
+        response = dynamodb.describe_table(TableName=table_name)
+        getLogger().debug(f"DDB Table details: {response}")
+        key_schema = response['Table']['KeySchema']
+        parsed_key_schema = [item['AttributeName'] for item in key_schema]
+        getLogger().debug(f"Key schema for table {table_name}: {parsed_key_schema}")
+        TABLE_KEY_SCHEMAS[table_name] = parsed_key_schema
+        return parsed_key_schema
+    except Exception as e:
+        getLogger().error(f"Error getting key schema for table {table_name}: {str(e)}")
+        raise e
+
 def process_export_file(bucket, key, account_id):
     getLogger().debug(f"Processing file {key} for bucket {bucket}")
     response = s3.get_object(Bucket=bucket, Key=key)
@@ -87,6 +105,7 @@ def process_export_file(bucket, key, account_id):
     try:
         with gzip.GzipFile(fileobj=BytesIO(response['Body'].read())) as gzipfile:
             for line in gzipfile:
+                getLogger().debug(f"Processing line: {line}")
                 item = json.loads(line)
                 event = create_stream_event(item, account_id, export_time, table_name)
                 event_size = len(json.dumps(event))
@@ -103,8 +122,10 @@ def process_export_file(bucket, key, account_id):
             post_records_batch(create_ndjson_records(batch))
     except (gzip.BadGzipFile, json.JSONDecodeError) as e:
         getLogger().error(f"Error processing file {key}: {str(e)}")
+        raise e
     except Exception as e:
         getLogger().error(f"Unexpected error processing file {key}: {str(e)}")
+        raise e
 
 def get_export_time(response):
     export_time = response.get('Metadata', {}).get('exportTime')
@@ -113,15 +134,18 @@ def get_export_time(response):
     return int(response['LastModified'].timestamp())
 
 def create_stream_event(item, account_id, export_time, table_name):
+    key_schema = get_table_key_schema(table_name)
+    keys = {attr: item['Item'][attr] for attr in key_schema if attr in item['Item']}
+    
     return {
-        "eventID": f"SNAPSHOT-{item['Item']['id']['S']}-{int(datetime.now().timestamp()*1000)}",
+        "eventID": str(uuid.uuid4()).replace('-', ''),
         "eventName": "SNAPSHOT",
         "eventVersion": "1.1",
         "eventSource": "aws:dynamodbSnapshot",
         "awsRegion": REGION,
         "dynamodb": {
             "ApproximateCreationDateTime": export_time,
-            "Keys": {"id": item['Item']['id']},
+            "Keys": keys,
             "NewImage": item['Item'],
             "SequenceNumber": "SNAPSHOT",
             "SizeBytes": len(json.dumps(item['Item']).encode('utf-8')),
@@ -201,14 +225,20 @@ def ensure_datasource_exists(table_name):
         getLogger().info(f"Tinybird API response: {create_response.status} - {create_response.data.decode('utf-8')}") 
 
 def post_records_batch(records):
-    ndjson_data = '\n'.join(json.dumps(record, ensure_ascii=False, cls=DDBEncoder) for record in records)
     table_name = TINYBIRD_DS_PREFIX + records[0]['eventSourceARN'].split(':table/')[1].split('/')[0]
+    
     if TINYBIRD_SKIP_TABLE_CHECK:
         getLogger().info("Skipping check to ensure Tinybird Datasource exists")
     else:
         ensure_datasource_exists(table_name)
-    params = {'name': table_name, 'format': 'ndjson'}
-    response = call_tinybird('POST', 'events', params, ndjson_data)
+    
+    response = call_tinybird(
+        method='POST', 
+        service='events', 
+        params={'name': table_name, 'format': 'ndjson'}, 
+        data='\n'.join(json.dumps(record, ensure_ascii=False, cls=DDBEncoder) for record in records)
+    )
+
     if response.status >= 400:
         error_message = response.data.decode('utf-8')
         raise Exception(f"Tinybird API request failed: {response.status} - {error_message}")
