@@ -4,12 +4,14 @@ This repository contains example solutions for replicating data out of DynamoDB 
 
 Both solutions, scanToExport and DDBStreamCDC contain their own readme files on usage.
 
-## DDBStreamCDC
-This solution leverages AWS DynamoDB Export to S3 & AWS DynamoDB Streams functionalities via a Python Lambda to forward both snapshots and changes to a Tinybird Datasource, which is then deduplicated for the latest values and made available for users.
+## DDBStreamCDC [Recommended]
+This solution leverages AWS DynamoDB Export to S3 & AWS DynamoDB Streams functionalities via a Python Lambda to forward both snapshots and changes to a Tinybird Datasource with Keys automatically indexed, which is then deduplicated for the latest values and made available for users.
 
 A simple implementation pathway is provided which may be expanded upon.
 
-## scanToExport
+More detail in the dedicated [readme](DDBStreamCDC/readme.md)
+
+## scanToExport [Legacy]
 
 This solution uses a simple DynamoDB Scan to export a file to an S3 bucket, and then uses the Tinybird Datasource Replace functionality, implemented as a Python Lambda.
 

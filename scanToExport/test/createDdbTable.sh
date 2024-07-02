@@ -1,6 +1,6 @@
 #!/bin/bash
 
-table_name="export_test_2"
+table_name="export_test"
 
 # Define the attribute definitions and key schema
 attribute_definitions='[{"AttributeName":"id","AttributeType":"S"}]'
