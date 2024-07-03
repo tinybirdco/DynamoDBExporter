@@ -1,12 +1,12 @@
 import json
 import os
-import time
 from decimal import Decimal
 from logging import INFO, getLogger
 import base64
 
 import boto3
 from boto3.dynamodb.types import TypeDeserializer, Binary
+from botocore.exceptions import ClientError
 import urllib3
 from urllib.parse import urlencode, urljoin
 
@@ -26,10 +26,12 @@ logger.setLevel(os.environ.get("LOGGING_LEVEL") or INFO)
 
 deserializer = TypeDeserializer()
 
-TINYBIRD_API_KEY = os.environ['TB_DS_ADMIN_TOKEN']  # DATASOURCE:CREATE and DATASOURCE:APPEND permissions
+TINYBIRD_API_KEY_FROM_ENV = os.environ.get('TB_CREATE_DS_TOKEN')  # DATASOURCE:CREATE and DATASOURCE:APPEND permissions
+TINYBIRD_API_KEY_FROM_SECRET = os.environ.get('TB_CREATE_DS_TOKEN_SECRET_NAME')
+TINYBIRD_API_KEY_SECRET_KEY_NAME = os.environ.get('TB_CREATE_DS_TOKEN_SECRET_KEY_NAME', 'TB_CREATE_DS_TOKEN')
 TINYBIRD_API_ENDPOINT = os.environ.get('TB_API_ENDPOINT', 'https://api.tinybird.co/v0/')
 TINYBIRD_DS_PREFIX = os.environ.get('TB_DS_PREFIX') or 'ddb_'
-TINYBIRD_SKIP_TABLE_CHECK = os.environ.get('TB_SKIP_TABLE_CHECK', 'False').lower() in ['true', '1', 't']
+TINYBIRD_SKIP_TABLE_CHECK = os.environ.get('TB_SKIP_TABLE_CHECK', 'False').lower() in ['true', '1', 't', 'yes', 'y']
 BATCH_SIZE = int(os.environ.get('TB_BATCH_SIZE', 250))  # Conservative default
 REGION = os.environ.get('AWS_REGION', 'eu-west-1')
 MAX_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10MB to Tinybird. Max from DDB is about 6Mb.
@@ -47,7 +49,10 @@ class DDBEncoder(json.JSONEncoder):
         return super().default(o)
 
 def lambda_handler(event, context):
+    logger.info(f"Lambda Handler start, initialization complete")
     try:
+        global TINYBIRD_API_KEY
+        TINYBIRD_API_KEY = get_tinybird_api_key()
         if 'Records' in event:
             if 's3' in event['Records'][0]:
                 logger.info(f"Processing event type S3: {json.dumps(event)}")
@@ -64,6 +69,36 @@ def lambda_handler(event, context):
         logger.error(f"Error processing event: {str(e)}", exc_info=True)
         return {"statusCode": 500, "body": json.dumps(str(e))}
 
+def get_tinybird_api_key():
+    # First, check if the API key is set as an environment variable
+    if TINYBIRD_API_KEY_FROM_ENV:
+        logger.info("Using Tinybird API key from environment variable")
+        return TINYBIRD_API_KEY_FROM_ENV
+    elif not TINYBIRD_API_KEY_FROM_SECRET:
+        raise ValueError("Tinybird API key or Secret Name not found in environment variables. See readme for instructions.")
+
+    # If not found in environment variables, fetch from Secrets Manager
+    try:
+        secrets_client = boto3.client('secretsmanager')
+        logger.info(f"Fetching Tinybird API key from Secrets Manager: {TINYBIRD_API_KEY_FROM_SECRET}")
+        response = secrets_client.get_secret_value(SecretId=TINYBIRD_API_KEY_FROM_SECRET)
+        if 'SecretString' in response:
+            secret = json.loads(response['SecretString'])
+            api_key = secret.get(TINYBIRD_API_KEY_SECRET_KEY_NAME)
+            if not api_key:
+                logger.error("API key not found in the secret")
+                raise ValueError("API key not found in the secret")
+            logger.info("Using Tinybird API key from Secrets Manager")
+            return api_key
+        else:
+            logger.error("Secret value not found in the expected format")
+            raise ValueError("Secret value not found in the expected format")
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'ResourceNotFoundException':
+            logger.error(f"The secret {TINYBIRD_API_KEY_FROM_SECRET} was not found")
+        else:
+            logger.error(f"Error fetching secret: {str(e)}")
+        raise
 
 def process_s3_event(event, context):
     account_id = context.invoked_function_arn.split(":")[4]
