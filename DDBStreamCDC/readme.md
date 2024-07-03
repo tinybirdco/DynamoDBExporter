@@ -9,6 +9,7 @@ This README outlines the process of setting up a Change Data Capture (CDC) syste
 * You can trigger a DynamoDB Snapshot to (re)initialize the export, and the Streams configuration will keep it up to date.
 * The Tinybird Datasource will automatically index the existing DynamoDB Keys, the rest of each Record will be provided as plain JSON ready for further processing.
 * You can deploy an example Materialized View to query the test data
+* Structure: DynamoDB, IAM (Role and Policy) >> S3, Lambda, Secrets Manager >> Tinybird
 
 ## Limitations
 
@@ -18,6 +19,7 @@ This README outlines the process of setting up a Change Data Capture (CDC) syste
 4. Batch sizes are largely configurable in the Lambda Trigger for the number of DDBStreams events to collect in each Trigger, and the amount of time to wait before invoking if enough events haven't arrived. This should give users good control over latency vs efficiency during the CDC replication stage of the processing.
 5. We do not automatically index DynamoDB GSIs. This is largely because they are not provided in the Stream event, and it would be an expensive operation to fetch the DynamoDB Table Description for them during every Invocation.
 6. The example Materialized View is deliberately simple to aid education, please contact us if you want to discuss more complex or high volume use cases.
+7. We use Lambda Triggers to receive and process data from the DynamoDB Stream feature. As of writing this only works within the same AWS Account and Region.
 
 ## 0. Create a Tinybird Workspace
 1. You will need a Tinybird Workspace to ship the DynamoDB Data to, either an existing one or create a new one.
