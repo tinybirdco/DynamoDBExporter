@@ -1,0 +1,38 @@
+{
+    "Records": [
+        {
+            "eventVersion": "2.1",
+            "eventSource": "aws:s3",
+            "awsRegion": "eu-west-2",
+            "eventTime": "2024-07-01T19:09:47.960Z",
+            "eventName": "ObjectCreated:CompleteMultipartUpload",
+            "userIdentity": {
+                "principalId": "AWS:REDACTED:user@domain.co"
+            },
+            "requestParameters": {
+                "sourceIPAddress": "10.0.161.141"
+            },
+            "responseElements": {
+                "x-amz-request-id": "REDACTED",
+                "x-amz-id-2": "REDACTED"
+            },
+            "s3": {
+                "s3SchemaVersion": "1.0",
+                "configurationId": "UUID",
+                "bucket": {
+                    "name": "tinybird-test-dynamodb-export",
+                    "ownerIdentity": {
+                        "principalId": "REDACTED"
+                    },
+                    "arn": "arn:aws:s3:::tinybird-test-dynamodb-export"
+                },
+                "object": {
+                    "key": "DDBStreamCDC/export_test/AWSDynamoDB/01719860687308-a8c85291/data/3elmwkc5smyu3lbwk6j6bfii74.json.gz",
+                    "size": 20,
+                    "eTag": "7deb4078f238dd87d6af0538152c04e9-1",
+                    "sequencer": "006682FEFB8857AEAF"
+                }
+            }
+        }
+    ]
+}

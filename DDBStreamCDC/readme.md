@@ -1,0 +1,129 @@
+# TinyDynamoCDC: DynamoDB to Tinybird Change Data Capture
+
+This README outlines the process of setting up a Change Data Capture (CDC) system from Amazon DynamoDB to Tinybird using AWS Lambda.
+
+
+## Features
+* Once configured, the Lambda will automatically forward any updates to the included DynamoDB tables to Tinybird Datasources matching the same name with an optional prefix. 
+* The Tinybird Datasource will be automatically created with an appropriate schema. 
+* You can trigger a DynamoDB Snapshot to (re)initialize the export, and the Streams configuration will keep it up to date.
+* The Tinybird Datasource will automatically index the existing DynamoDB Keys, the rest of each Record will be provided as plain JSON ready for further processing.
+* You can deploy an example Materialized View to query the test data
+
+## Limitations
+
+1. The DynamoDB Streams service only keeps events for 24hours. If this service is somehow down for longer than that, your data will be stale and you should create a new Snapshot to reinitialize the Tinybird table. Some users choose to do this nightly as a precautionary measure.
+2. Binary data in the DynamoDB table is exported in base64 encoded form as we cannot have certainty that it will be String-like or some other format. The user may make determination in processing downstream.
+3. We use the exportTime of the Export to S3 Point-in-time Backup from the DynamoDB table to simulate the ApproximateCreationDateTime you get from a DynamoDB Stream CDC event. This should ensure that any changes made after the Snapshot is issued will be applied in order to the destination Tinybird Datasource during deduplication.
+4. Batch sizes are largely configurable in the Lambda Trigger for the number of DDBStreams events to collect in each Trigger, and the amount of time to wait before invoking if enough events haven't arrived. This should give users good control over latency vs efficiency during the CDC replication stage of the processing.
+5. We do not automatically index DynamoDB GSIs. This is largely because they are not provided in the Stream event, and it would be an expensive operation to fetch the DynamoDB Table Description for them during every Invocation.
+6. The example Materialized View is deliberately simple to aid education, please contact us if you want to discuss more complex or high volume use cases.
+
+## 1. Setup DynamoDB Table
+1. Your DynamoDB table needs to be configured with both DDBStreams activated to send changes, and point-in-time recovery to allow Snapshots to be created. The script `test/createDdbTable.sh` contains AWS CLI commands to help you with this.
+2. DDBStreams should be turned on before you do an initial snapshot, otherwise you may miss any changes between the snapshot completion and streams activation. If you enable DDBStreams when you first create the table you should have no problems.
+
+## 2. Create an S3 Bucket for your Snapshots
+You need an S3 Bucket that the Snapshots can be stored in, it can be a separate bucket just for this purpose, or you can use a prefix in the Snapshot configuration (recommended anyway) to keep the data exports contained to one area of some other bucket. This bucket is not exposed publicly and is only used to get 'free' snapshots from DynamoDB without using a full Scan.
+
+1. Create a bucket, retain the name for use in later configurations.
+
+## 3. Create IAM Policy
+1. Navigate to IAM in the AWS Console.
+2. Create a new Policy for the Lambda
+3. Use the [provided](DDBStreamCDC/lambda_policy.json) policy JSON as a starting point:
+4. Update the policy with your specific S3 bucket name.
+
+## 4. Create IAM Role
+
+1. Navigate to IAM in AWS Console.
+2. Create a new role for Lambda.
+3. Use the Policy you just created.
+4. Retain the Policy name for when you create the Lambda.
+
+## 5. Create Lambda Function
+
+1. Go to AWS Lambda and create a new function.
+2. Select 'Author from Scratch' option
+2. Name it something memorable, such as "TinybirdDynamoCDC".
+3. Choose Python 3.10 as the runtime.
+4. Set the architecture to x86_64.
+5. Set the timeout to 1 minute.
+6. Assign the IAM role created in step 1.
+7. Use the code from TinyDynamoCDC.py for the function.
+8. Deploy the function.
+
+### Configure Environment Variables
+In the Lambda configuration, add these environment variables:
+
+#### Required
+1. TB_DS_ADMIN_TOKEN: Your Tinybird Data Source Admin Token (Create this in Tinybird). It requires the `DATASOURCE:APPEND` and `DATASOURCE:CREATE` scopes. By default the `create datasource token` in Tinybird has these scopes already.
+2. You can modify the Lambda to use an AWS Secret instead as required.
+
+#### Optional
+1. TB_DS_PREFIX: The prefix to apply to the DynamoDB table names when creating them in Tinybird, it defaults to `ddb_`
+2. TB_API_ENDPOINT: The URL of your Tinybird Workspace, if different than the default. You can easily find this in the Add Datasource > Events API example in the UI. It defaults to `https://api.tinybird.co/v0/`
+3. TB_SKIP_TABLE_CHECK: You can set this to True if you want the script to skip checking if the target Tinybird Datasource already exists. The script will create it with a good schema by default, but once it's running you may want to set this to skip the extra API call every invocation.
+4. LOGGING_LEVEL: Controls the detailed logging level of the Lambda. Defaults to `INFO`, can be set to `DEBUG` for more verbosity.
+
+## 6. Add S3 Trigger
+
+1. In the Lambda function, add a new trigger.
+2. Choose S3 as the source.
+3. Select your S3 bucket.
+4. Set the event type to "All object create events".
+5. Add .gz as the suffix so non-data files do not trigger the lambda
+6. Add the prefix `DDBStreamCDC` to collect all your exports into a common folder. Note that this prefix is also used in the createSnapshot.sh script if you want to change it.
+7. Set the Destination as your Lambda Function ARN.
+
+## 7. Add DynamoDB Trigger(s)
+
+1. Add another trigger to the Lambda function.
+2. Choose DynamoDB as the source.
+3. Select your DynamoDB table.
+4. Configure the following settings:
+    * Batch size: 250
+    * Starting Position: Trim Horizon
+    * Batch window: 5 seconds
+    * Retry attempts: 5
+    * Split batch on error: Yes
+5. Repeat for each source DynamoDB Table to be replicated.
+
+## 8. Create Initial Snapshot
+1. Use the UI or the provided utils.py script to generate an initial snapshot of the DynamoDB table. This can also act as an initial deployment test.
+2. Note that the Lambda Event handler relies on the DynamoDB Table name to be included in the s3 object key as a part of the prefix. This is automatically included if you use the supplied example scripts.
+
+## 9. Testing
+After setting up the system, you can test it by:
+
+* Ensuring your initial Snapshot finished in the DynamoDB > Tables > Exports and streams view
+* Ensure your Lambda completed processing it by reviewing it's Cloudwatch Logs
+* Making INSERT, MODIFY and REMOVE changes to your DynamoDB table.
+* Checking the Tinybird table for the updates.
+* Monitoring CloudWatch logs for any errors.
+* Sending test events through the Lambda to check for error handling.
+
+There are many functions to aid in this in the provided utils.py script
+
+### Using utils.py
+1. Install the requirements.txt in a Python3 virtualenv
+2. run `python3 utils.py --help` for a list of options.
+3. Note that to run the Tinybird Materialized View setup you will need to run `tb auth` in this folder to set up your Admin access Token.
+
+There are also sample events you can modify to fit your deployment that you can use to trigger your Lambda when testing.
+
+## 10. [Optional] Set Up Alerting
+
+1. Create an SNS Topic (e.g., "TinyDynamoCDC").
+2. Add a subscription to your preferred endpoint (Email, another Tinybird table, etc.).
+3. Create a CloudWatch Alarm:
+    * Choose the Lambda function metric for Errors.
+    * Set the statistic to Sum and the period to 5 minutes.
+    * Set the condition to "Greater/Equal than 1".
+    * For alarm state trigger, choose your SNS topic.
+
+## Troubleshooting
+
+* Check Lambda function logs in CloudWatch for detailed error messages.
+* Ensure all IAM permissions are correctly set.
+* Verify that the Tinybird API token has the necessary permissions.
