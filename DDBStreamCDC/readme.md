@@ -10,6 +10,7 @@ This README outlines the process of setting up a Change Data Capture (CDC) syste
 * The Tinybird Datasource will automatically index the existing DynamoDB Keys, the rest of each Record will be provided as plain JSON ready for further processing.
 * You can deploy an example Materialized View to query the test data
 * Structure: DynamoDB, IAM (Role and Policy) >> S3, Lambda, Secrets Manager >> Tinybird
+* Management functions are provided in utils.py to cover a large number of deployment and operational requirements, including full deploy or teardown of a test case.
 
 ## Limitations
 
@@ -21,11 +22,13 @@ This README outlines the process of setting up a Change Data Capture (CDC) syste
 6. The example Materialized View is deliberately simple to aid education, please contact us if you want to discuss more complex or high volume use cases.
 7. We use Lambda Triggers to receive and process data from the DynamoDB Stream feature. As of writing this only works within the same AWS Account and Region.
 
-## 0. Create a Tinybird Workspace
+## Manual Deployment
+
+### 0. Create a Tinybird Workspace
 1. You will need a Tinybird Workspace to ship the DynamoDB Data to, either an existing one or create a new one.
 2. In that Workspace, go to the Tokens UI and find the `create datasource token`, this has the permissions to create and append data to Datasources that we'll need later.
 
-### Optional AWS Secret Manager
+#### Optional AWS Secret Manager
 Later you will need to supply your Tinybird Token to the Lambda, you can either do this by putting it into AWS Secrets Manager or into an Environment Variable in the Lambda Configuration. If you want to use the Secret Manager option, it is good to do it at this stage so you have everything you need when it comes time to create the Lambda.
 
 To create the secret:
@@ -36,30 +39,40 @@ To create the secret:
 5. Set the Value as the Token from `create datasource token`which you copied from Tinybird; it is usually a long alphanumeric String starting with `p.`
 6. On the next page, name the Secret something like `TinybirdAPIKey-test`. Consider using a meaningful prefix here so that you can easily set it in your Access Policy in later steps, something like `TinybirdAPIKey-` with any suffix would be fine.
 
-## 1. Setup DynamoDB Table
+### 1. Setup DynamoDB Table
 1. Your DynamoDB table needs to be configured with both DDBStreams activated to send changes, and point-in-time recovery to allow Snapshots to be created. The utils script contains functions to help you with this.
 2. DDBStreams should be turned on before you do an initial snapshot, otherwise you may miss any changes between the snapshot completion and streams activation. If you enable DDBStreams when you first create the table you should have no problems.
 
-## 2. Create an S3 Bucket for your Snapshots
+### 2. Create an S3 Bucket for your Snapshots
 You need an S3 Bucket that the Snapshots can be stored in, it can be a separate bucket just for this purpose, or you can use a prefix in the Snapshot configuration (recommended anyway) to keep the data exports contained to one area of some other bucket. This bucket is not exposed publicly and is only used to get 'free' snapshots from DynamoDB without using a full Scan.
 
 1. Create a bucket, retain the name for use in later configurations.
 
-## 3. Create IAM Policy
+### 3. Create IAM Policy
+Policy controls are required to allow the Role to take necessary actions within your account.
+You can either use a set of standard AWS Policies, or create your own from the provided template.
+
+#### Use default Policies
+  * arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole,
+  * arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess,
+  * arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess,
+  * arn:aws:iam::aws:policy/SecretsManagerReadWrite
+
+#### Create your own Policy
 1. Navigate to IAM in the AWS Console.
 2. Create a new Policy for the Lambda.
-3. Use the [provided](DDBStreamCDC/lambda_policy.json) policy JSON as a starting point:
+3. Use the [provided](DDBStreamCDC/lambda_policy.json) policy JSON as a starting point.
 4. Update the policy with your specific S3 bucket name.
 5. Update the policy with your Tinybird API Key Secret prefix or name, if using that feature.
 
-## 4. Create IAM Role
+### 4. Create IAM Role
 
 1. Navigate to IAM in AWS Console.
 2. Create a new role for Lambda.
-3. Use the Policy you just created.
+3. Attach the Policy or Policies you have selected.
 4. Retain the Policy name for when you create the Lambda.
 
-## 5. Create Lambda Function
+### 5. Create Lambda Function
 
 1. Go to AWS Lambda and create a new function.
 2. Select 'Author from Scratch' option
@@ -71,10 +84,10 @@ You need an S3 Bucket that the Snapshots can be stored in, it can be a separate 
 7. Use the code from TinyDynamoCDC.py for the function.
 8. Deploy the function.
 
-### Configure Environment Variables
+#### Configure Environment Variables
 In the Lambda configuration, add these environment variables:
 
-#### Required
+##### Required
 The Lambda requires a Tinybird Token to push the data into your Workspace. It requires the `DATASOURCE:APPEND` and `DATASOURCE:CREATE` scopes. By default the `create datasource token` in Tinybird has these scopes already.
 You have two options:
 * TB_CREATE_DS_TOKEN: Set this environment variable with the Token directly if you wish. This will override the Secret option below if set. 
@@ -82,7 +95,7 @@ You have two options:
   **OR**
 * TB_CREATE_DS_TOKEN_SECRET_NAME: The name of a Secret in AWS Secrets Manager which contains the necessary Token. This is the default and preferred behavior. We recommend you name it with a standard prefix like `TinybirdAPIKey-` to make it easy to set in your access policy for retrieval.
 
-#### Optional
+##### Optional
 1. TB_DS_PREFIX: The prefix to apply to the DynamoDB table names when creating them in Tinybird, it defaults to `ddb_`
 2. TB_API_ENDPOINT: The URL of your Tinybird Workspace, if different than the default. You can easily find this in the Add Datasource > Events API example in the UI. It defaults to `https://api.tinybird.co/v0/`
 3. TB_SKIP_TABLE_CHECK: You can set this to True if you want the script to skip checking if the target Tinybird Datasource already exists. The script will create it with a good schema by default, but once it's running you may want to set this to skip the extra API call every invocation.
@@ -92,7 +105,7 @@ You have two options:
 7. LOGGING_LEVEL: Controls the detailed logging level of the Lambda. Defaults to `INFO`, can be set to `DEBUG` for more verbosity.
 8. TB_CREATE_DS_TOKEN_SECRET_KEY_NAME: You can use this to override the name of the Key in the AWS Secret Manager that stores the Tinybird API Token. Defaults to `TB_CREATE_DS_TOKEN`.
 
-## 6. Add S3 Trigger
+### 6. Add S3 Trigger
 
 1. In the Lambda function, add a new trigger.
 2. Choose S3 as the source.
@@ -102,7 +115,7 @@ You have two options:
 6. Add the prefix `DDBStreamCDC` to collect all your exports into a common folder. Note that this prefix is also used in the createSnapshot.sh script if you want to change it.
 7. Set the Destination as your Lambda Function ARN.
 
-## 7. Add DynamoDB Trigger(s)
+### 7. Add DynamoDB Trigger(s)
 
 1. Add another trigger to the Lambda function.
 2. Choose DynamoDB as the source.
@@ -115,11 +128,32 @@ You have two options:
     * Split batch on error: Yes
 5. Repeat for each source DynamoDB Table to be replicated.
 
-## 8. Create Initial Snapshot
+### 8. Create Initial Snapshot
 1. Use the UI or the provided utils.py script to generate an initial snapshot of the DynamoDB table. This can also act as an initial deployment test.
 2. Note that the Lambda Event handler relies on the DynamoDB Table name to be included in the s3 object key as a part of the prefix. This is automatically included if you use the supplied example scripts.
 
-## 9. Testing
+### 10. [Optional] Set Up Alerting
+
+1. Create an SNS Topic (e.g., "TinyDynamoCDC").
+2. Add a subscription to your preferred endpoint (Email, another Tinybird table, etc.).
+3. Create a CloudWatch Alarm:
+    * Choose the Lambda function metric for Errors.
+    * Set the statistic to Sum and the period to 5 minutes.
+    * Set the condition to "Greater/Equal than 1".
+    * For alarm state trigger, choose your SNS topic.
+
+## Automated Deployment
+We have spent time on a number of deployment and operational utilities to aid you in setting up this Integration within the utils.py script.
+**These utilities are currently experimental, though quite straight forward in their operation. Please test them carefully before use.**
+
+1. Clone this repo, and change directory into this sub-folder.
+2. Get your User Admin Token from your Tinybird Workspace, and use it with `tb auth`.
+3. Ensure you are authenticated with AWS CLI.
+4. Install the requirements.txt within your Python interpreter or VirtualEnv.
+5. Execute `python3 utils.py --help` to see the options.
+6. Many defaults are set at the top of utils.py, or can be passed in as args.
+
+## Testing
 After setting up the system, you can test it by:
 
 * Ensuring your initial Snapshot finished in the DynamoDB > Tables > Exports and streams view
@@ -130,23 +164,6 @@ After setting up the system, you can test it by:
 * Sending test events through the Lambda to check for error handling.
 
 There are many functions to aid in this in the provided utils.py script
-
-### Using utils.py
-1. Install the requirements.txt in a Python3 virtualenv
-2. run `python3 utils.py --help` for a list of options.
-3. Note that to run the Tinybird Materialized View setup you will need to run `tb auth` in this folder to set up your Admin access Token.
-
-There are also sample events you can modify to fit your deployment that you can use to trigger your Lambda when testing.
-
-## 10. [Optional] Set Up Alerting
-
-1. Create an SNS Topic (e.g., "TinyDynamoCDC").
-2. Add a subscription to your preferred endpoint (Email, another Tinybird table, etc.).
-3. Create a CloudWatch Alarm:
-    * Choose the Lambda function metric for Errors.
-    * Set the statistic to Sum and the period to 5 minutes.
-    * Set the condition to "Greater/Equal than 1".
-    * For alarm state trigger, choose your SNS topic.
 
 ## Troubleshooting
 

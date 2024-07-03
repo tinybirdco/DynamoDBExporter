@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from decimal import Decimal
 from logging import INFO, getLogger
 import base64
@@ -36,6 +37,21 @@ BATCH_SIZE = int(os.environ.get('TB_BATCH_SIZE', 250))  # Conservative default
 REGION = os.environ.get('AWS_REGION', 'eu-west-1')
 MAX_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10MB to Tinybird. Max from DDB is about 6Mb.
 TABLE_KEY_SCHEMAS = {}
+
+# Global variables for caching
+# The API Key and Tinybird Landing Table Existence are cached for the duration of the Lambda execution
+GLOBAL_CACHE = {}
+CACHE_EXPIRATION = 300  # 5 minutes
+
+def get_from_cache(key):
+    if key in GLOBAL_CACHE:
+        value, timestamp = GLOBAL_CACHE[key]
+        if time.time() - timestamp < CACHE_EXPIRATION:
+            return value
+    return None
+
+def set_in_cache(key, value):
+    GLOBAL_CACHE[key] = (value, time.time())
 
 class DDBEncoder(json.JSONEncoder):
     def default(self, o):
@@ -78,27 +94,32 @@ def get_tinybird_api_key():
         raise ValueError("Tinybird API key or Secret Name not found in environment variables. See readme for instructions.")
 
     # If not found in environment variables, fetch from Secrets Manager
-    try:
-        secrets_client = boto3.client('secretsmanager')
-        logger.info(f"Fetching Tinybird API key from Secrets Manager: {TINYBIRD_API_KEY_FROM_SECRET}")
-        response = secrets_client.get_secret_value(SecretId=TINYBIRD_API_KEY_FROM_SECRET)
-        if 'SecretString' in response:
-            secret = json.loads(response['SecretString'])
-            api_key = secret.get(TINYBIRD_API_KEY_SECRET_KEY_NAME)
-            if not api_key:
-                logger.error("API key not found in the secret")
-                raise ValueError("API key not found in the secret")
-            logger.info("Using Tinybird API key from Secrets Manager")
-            return api_key
-        else:
-            logger.error("Secret value not found in the expected format")
-            raise ValueError("Secret value not found in the expected format")
-    except ClientError as e:
-        if e.response['Error']['Code'] == 'ResourceNotFoundException':
-            logger.error(f"The secret {TINYBIRD_API_KEY_FROM_SECRET} was not found")
-        else:
-            logger.error(f"Error fetching secret: {str(e)}")
-        raise
+    if cached_secret := get_from_cache(TINYBIRD_API_KEY_SECRET_KEY_NAME):
+        logger.info("Using Tinybird API key from cache")
+        return cached_secret
+    else:
+        try:
+            secrets_client = boto3.client('secretsmanager')
+            logger.info(f"Fetching Tinybird API key from Secrets Manager: {TINYBIRD_API_KEY_FROM_SECRET}")
+            response = secrets_client.get_secret_value(SecretId=TINYBIRD_API_KEY_FROM_SECRET)
+            if 'SecretString' in response:
+                secret = json.loads(response['SecretString'])
+                api_key = secret.get(TINYBIRD_API_KEY_SECRET_KEY_NAME)
+                if not api_key:
+                    logger.error("API key not found in the secret")
+                    raise ValueError("API key not found in the secret")
+                logger.info("Using Tinybird API key from Secrets Manager - updating cache and returning")
+                set_in_cache(TINYBIRD_API_KEY_SECRET_KEY_NAME, api_key)
+                return api_key
+            else:
+                logger.error("Secret value not found in the expected format")
+                raise ValueError("Secret value not found in the expected format")
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'ResourceNotFoundException':
+                logger.error(f"The secret {TINYBIRD_API_KEY_FROM_SECRET} was not found")
+            else:
+                logger.error(f"Error fetching secret: {str(e)}")
+            raise
 
 def process_s3_event(event, context):
     account_id = context.invoked_function_arn.split(":")[4]
@@ -299,6 +320,11 @@ def get_default_value(ch_type):
         return "DEFAULT ''"  # Default for any other type
 
 def ensure_datasource_exists(full_table_name, key_types):
+    cache_key = f"tinybird_table_{full_table_name}"
+    cached_status = get_from_cache(cache_key)
+    if cached_status:
+        logger.info(f"Skipping Table exists check for {full_table_name} - Cache hit")
+        return
     response = call_tinybird("GET", "datasources", {"attrs": "name"})
     logger.debug(f"Tinybird API response: {response.status} - {response.data.decode('utf-8')}")
     
@@ -308,7 +334,8 @@ def ensure_datasource_exists(full_table_name, key_types):
             existing_tables = [ds['name'] for ds in datasources]
             
             if full_table_name in existing_tables:
-                logger.info(f"Table {full_table_name} already exists")
+                logger.info(f"Table {full_table_name} already exists - updating cache and returning")
+                set_in_cache(cache_key, "datasource_exists")
                 return
             else:
                 logger.info(f"Table {full_table_name} does not exist, creating it now")
