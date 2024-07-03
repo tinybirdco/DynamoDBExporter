@@ -32,7 +32,7 @@ To create the secret:
 3. Select Other Type of Secret
 4. Set the Key as: `TB_CREATE_DS_TOKEN`
 5. Set the Value as the Token from `create datasource token`which you copied from Tinybird; it is usually a long alphanumeric String starting with `p.`
-6. On the next page, name the Secret something like `TinybirdAPIKey`. Consider using a meaningful prefix here so that you can easily set it in your Access Policy in later steps, something like `TinybirdAPIKey-test` would be fine.
+6. On the next page, name the Secret something like `TinybirdAPIKey-test`. Consider using a meaningful prefix here so that you can easily set it in your Access Policy in later steps, something like `TinybirdAPIKey-` with any suffix would be fine.
 
 ## 1. Setup DynamoDB Table
 1. Your DynamoDB table needs to be configured with both DDBStreams activated to send changes, and point-in-time recovery to allow Snapshots to be created. The utils script contains functions to help you with this.
@@ -75,9 +75,9 @@ In the Lambda configuration, add these environment variables:
 #### Required
 The Lambda requires a Tinybird Token to push the data into your Workspace. It requires the `DATASOURCE:APPEND` and `DATASOURCE:CREATE` scopes. By default the `create datasource token` in Tinybird has these scopes already.
 You have two options:
-* TB_CREATE_DS_TOKEN: Set this environment variable with the Token directly if you wish. This will override the Secret option below if set. We recommend you name it with a standard prefix like `TinybirdAPIKey-` to make it easy to set in your access policy for retrieval.
+* TB_CREATE_DS_TOKEN: Set this environment variable with the Token directly if you wish. This will override the Secret option below if set. 
   **OR**
-* TB_CREATE_DS_TOKEN_SECRET_NAME: The name of a Secret in AWS Secrets Manager which contains the necessary Token. This is the default and preferred behavior.
+* TB_CREATE_DS_TOKEN_SECRET_NAME: The name of a Secret in AWS Secrets Manager which contains the necessary Token. This is the default and preferred behavior. We recommend you name it with a standard prefix like `TinybirdAPIKey-` to make it easy to set in your access policy for retrieval.
 
 #### Optional
 1. TB_DS_PREFIX: The prefix to apply to the DynamoDB table names when creating them in Tinybird, it defaults to `ddb_`
