@@ -78,6 +78,7 @@ In the Lambda configuration, add these environment variables:
 The Lambda requires a Tinybird Token to push the data into your Workspace. It requires the `DATASOURCE:APPEND` and `DATASOURCE:CREATE` scopes. By default the `create datasource token` in Tinybird has these scopes already.
 You have two options:
 * TB_CREATE_DS_TOKEN: Set this environment variable with the Token directly if you wish. This will override the Secret option below if set. 
+
   **OR**
 * TB_CREATE_DS_TOKEN_SECRET_NAME: The name of a Secret in AWS Secrets Manager which contains the necessary Token. This is the default and preferred behavior. We recommend you name it with a standard prefix like `TinybirdAPIKey-` to make it easy to set in your access policy for retrieval.
 
