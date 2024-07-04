@@ -44,11 +44,12 @@ DEFAULT_S3_PREFIX = "DDBStreamCDC"
 DEFAULT_LAMBDA_ROLE_NAME = "DDBStreamCDC-LambdaRole"
 DEFAULT_LAMBDA_FUNCTION_NAME = "DDBStreamCDC-LambdaFunction"
 DEFAULT_SECRET_NAME = "DDBStreamCDC-TinybirdSecret"
-DEFAULT_BATCH_SIZE = 250
+DEFAULT_BATCH_SIZE = 500
 DEFAULT_STREAM_STARTING_POSITION = "TRIM_HORIZON"
 DEFAULT_TINYBIRD_TABLE_PREFIX = "ddb_"
 RANDOM_SCAN_LIMIT = 50
 DEFAULT_LAMBDA_TIMEOUT = 300
+DEFAULT_BATCH_WINDOW = 5
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -85,7 +86,7 @@ def manage_aws_secret(secret_name, operation='create', overwrite=False):
                     logger.info(f"Updated secret: {secret_name}")
                 else:
                     logger.warning(f"Secret {secret_name} already exists and overwrite is False. Skipping creation.")
-            elif e.response['Error']['Code'] == 'InvalidRequestException' and 'deleted' in str(e):
+            elif e.response['Error']['Code'] == 'InvalidRequestException' and 'already scheduled for deletion' in str(e):
                 logger.warning(f"Secret {secret_name} was previously deleted. Attempting to restore.")
                 try:
                     get_client('secretsmanager').restore_secret(SecretId=secret_name)
@@ -223,31 +224,37 @@ def create_lambda_function(function_name, handler, runtime, role_name, code_dir,
     logger.info(f"Creating Lambda function: {function_name}")
     with open(zip_file, 'rb') as f:
         zipped_code = f.read()
-
-    try:
-        response = get_client('lambda').create_function(
-            FunctionName=function_name,
-            Runtime=runtime,
-            Role=role_arn,
-            Handler=handler,
-            Code=dict(ZipFile=zipped_code),
-            Timeout=timeout,
-            MemorySize=128,
-            Environment={'Variables': env_vars}
-        )
-        logger.info(f"Lambda function created: {response['FunctionArn']}")
-        return response['FunctionArn']
-    except ClientError as e:
-        if e.response['Error']['Code'] == 'ResourceConflictException':
-            if overwrite:
-                logger.warning(f"Lambda function {function_name} already exists. Updating it.")
-                return update_lambda_function(function_name, code_dir)
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = get_client('lambda').create_function(
+                FunctionName=function_name,
+                Runtime=runtime,
+                Role=role_arn,
+                Handler=handler,
+                Code=dict(ZipFile=zipped_code),
+                Timeout=timeout,
+                MemorySize=128,
+                Environment={'Variables': env_vars}
+            )
+            logger.info(f"Lambda function created: {response['FunctionArn']}")
+            return response['FunctionArn']
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'ResourceConflictException':
+                if overwrite:
+                    logger.warning(f"Lambda function {function_name} already exists. Updating it.")
+                    return update_lambda_function(function_name, code_dir)
+                else:
+                    logger.warning(f"Lambda function {function_name} already exists and overwrite is False. Skipping creation.")
+                    return get_lambda_arn(function_name)
+            if e.response['Error']['Code'] == 'InvalidParameterValueException':
+                if "The role defined for the function cannot be assumed by Lambda" in str(e) and attempt < max_retries - 1:
+                    logger.warning(f"Role not ready, retrying in 10 seconds... (Attempt {attempt + 1}/{max_retries})")
+                    time.sleep(5)
             else:
-                logger.warning(f"Lambda function {function_name} already exists and overwrite is False. Skipping creation.")
-                return get_lambda_arn(function_name)
-        else:
-            logger.error(f"Error creating Lambda function: {e}")
-            raise
+                logger.error(f"Error creating Lambda function: {e}")
+                raise
 
 def update_lambda_function(function_name, code_dir):
     zip_file = '/tmp/lambda_function.zip'
@@ -390,7 +397,7 @@ def setup_dynamodb_trigger(table_name, lambda_arn, region):
             FunctionName=lambda_arn,
             StartingPosition=DEFAULT_STREAM_STARTING_POSITION,
             BatchSize=DEFAULT_BATCH_SIZE,
-            MaximumBatchingWindowInSeconds=5
+            MaximumBatchingWindowInSeconds=DEFAULT_BATCH_WINDOW
         )
         logger.info(f"Created new DynamoDB Stream trigger for Lambda function {lambda_arn}")
     except Exception as e:

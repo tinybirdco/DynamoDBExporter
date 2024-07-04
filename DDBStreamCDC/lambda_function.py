@@ -4,6 +4,7 @@ import time
 from decimal import Decimal
 from logging import INFO, getLogger
 import base64
+import re
 
 import boto3
 from boto3.dynamodb.types import TypeDeserializer, Binary
@@ -33,9 +34,11 @@ TINYBIRD_API_KEY_SECRET_KEY_NAME = os.environ.get('TB_CREATE_DS_TOKEN_SECRET_KEY
 TINYBIRD_API_ENDPOINT = os.environ.get('TB_API_ENDPOINT', 'https://api.tinybird.co/v0/')
 TINYBIRD_DS_PREFIX = os.environ.get('TB_DS_PREFIX') or 'ddb_'
 TINYBIRD_SKIP_TABLE_CHECK = os.environ.get('TB_SKIP_TABLE_CHECK', 'False').lower() in ['true', '1', 't', 'yes', 'y']
+TINYBIRD_KEY_PREFIX = os.environ.get('TB_KEY_PREFIX', 'key_')
 BATCH_SIZE = int(os.environ.get('TB_BATCH_SIZE', 250))  # Conservative default
 REGION = os.environ.get('AWS_REGION', 'eu-west-1')
 MAX_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10MB to Tinybird. Max from DDB is about 6Mb.
+MAX_NAME_LENGTH = 128 # Maximum length for a Tinybird Datasource name
 TABLE_KEY_SCHEMAS = {}
 
 # Global variables for caching
@@ -133,7 +136,10 @@ def process_s3_event(event, context):
             logger.info(f"Skipping non-gzipped file: {key}")
 
 def extract_table_name_from_record(record):
-    return record['eventSourceARN'].split(':table/')[1].split('/')[0]
+    value = record['eventSourceARN'].split(':table/')[1].split('/')[0]
+    if not value:
+        raise ValueError(f"DynamoDB Table name cannot be empty, could not extract from {record['eventSourceARN']}")
+    return value
 
 def process_dynamodb_stream_event(event):
     if records := event.get("Records"):
@@ -261,10 +267,13 @@ def create_ndjson_records(records):
 
     def extract_key_values(record):
         keys = record["dynamodb"].get("Keys", {})
+        out = {}
         for k, v in keys.items():
-            if f"key_{k}" not in key_types:
-                key_types[f"key_{k}"] = list(v.keys())[0]
-        return {f"key_{k}": __deserialize(v) for k, v in keys.items()}
+            key_name = ddb_name_to_tinybird_name(k, TINYBIRD_KEY_PREFIX)
+            if key_name not in key_types:
+                key_types[key_name] = list(v.keys())[0]
+            out[key_name] = __deserialize(v)
+        return out
 
     ndjson_records = [{
         "eventID": record["eventID"],
@@ -389,9 +398,34 @@ def ensure_datasource_exists(full_table_name, key_types):
     else:
         logger.info(f"Tinybird API response: {create_response.status} - {create_response.data.decode('utf-8')}")
 
+def ddb_name_to_tinybird_name(ddb_value, tb_prefix=None):
+    # Tinybird requires a Datasource name to start with a letter and contain only lowercase letters, numbers, and underscores
+    # it also cannot be a reserved word, which the prefix will prevent
+    # DynamoDb additionally allows some characters like . and - in names, but Tinybird does not.
+    # https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.NamingRulesDataTypes.html
+
+    # Replace invalid characters with underscores
+    out_value = re.sub(r'[^a-zA-Z0-9_]', '_', ddb_value)
+    
+    if tb_prefix:
+        # Ensure prefix isn't empty and starts with a letter and uses valid characters, or use default prefix
+        if not tb_prefix or not tb_prefix[0].isalpha():
+            logger.warning(f"Configured Prefix {tb_prefix} does not start with a letter, using default 'ddb_'")
+            prefix = 'ddb_'
+        else:
+            prefix = re.sub(r'[^a-zA-Z0-9_]', '_', tb_prefix)
+            # ensure the prefix has a trailing underscore
+            prefix = f"{prefix}_" if prefix[-1] != '_' else prefix
+        out_value = f"{prefix}{out_value}"
+    
+    # Remove consecutive underscores and trailing underscores and truncate to maximum allowed length
+    out_value = re.sub(r'_+', '_', out_value).rstrip('_')[:MAX_NAME_LENGTH]
+    logger.debug(f"Converted DynamoDB Name {ddb_value} with prefix {tb_prefix} to Tinybird name {out_value}")
+    return out_value
+
 def post_records_batch(records, key_types):
     base_table_name = extract_table_name_from_record(records[0])
-    full_table_name = TINYBIRD_DS_PREFIX + base_table_name
+    full_table_name = ddb_name_to_tinybird_name(base_table_name, TINYBIRD_DS_PREFIX)
     
     if not TINYBIRD_SKIP_TABLE_CHECK:
         ensure_datasource_exists(full_table_name, key_types)
