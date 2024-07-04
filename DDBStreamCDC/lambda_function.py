@@ -295,12 +295,34 @@ def create_ndjson_records(records):
 
     return ndjson_records, key_types
 
+def normalize_tinybird_endpoint(endpoint):
+    # Remove any trailing slashes, strip whitespace, and convert to lowercase
+    endpoint = endpoint.rstrip('/').strip().lower()
+    
+    # Define the regex pattern to match the domain starting with 'api'
+    pattern = r'^(https?://)?(api\.([a-z0-9-]+\.)*tinybird\.co)(/.*)?$'
+    
+    # Try to match the pattern
+    match = re.search(pattern, endpoint)
+    
+    if match:
+        # Extract the core domain
+        core_domain = match.group(2)
+        
+        # Construct the normalized URL always using https
+        normalized_endpoint = f'https://{core_domain}/v0/'
+        
+        return normalized_endpoint
+    else:
+        raise ValueError(f"Invalid Tinybird API endpoint: {endpoint}")
+
 def call_tinybird(method, service, params, data=None):
     headers = {
         'Authorization': f'Bearer {TINYBIRD_API_KEY}',
         'Content-Type': 'application/json',
     }
-    url = urljoin(TINYBIRD_API_ENDPOINT, f"{service}?{urlencode(params)}")
+    normalized_url = normalize_tinybird_endpoint(TINYBIRD_API_ENDPOINT)
+    url = urljoin(normalized_url, f"{service}?{urlencode(params)}")
     logger.debug(f"Calling Tinybird API: {method} - {url}")
     with urllib3.PoolManager() as http:
         return http.request(
