@@ -1,8 +1,10 @@
 import json
 import os
+import time
 from decimal import Decimal
 from logging import INFO, getLogger
 import base64
+import re
 
 import boto3
 from boto3.dynamodb.types import TypeDeserializer, Binary
@@ -21,7 +23,7 @@ def s3_conditional_setup():
     dynamodb = boto3.client('dynamodb')
 
 # Setup Logging
-logger = getLogger()
+logger = getLogger('DDBStreamCDC')
 logger.setLevel(os.environ.get("LOGGING_LEVEL") or INFO)
 
 deserializer = TypeDeserializer()
@@ -32,10 +34,27 @@ TINYBIRD_API_KEY_SECRET_KEY_NAME = os.environ.get('TB_CREATE_DS_TOKEN_SECRET_KEY
 TINYBIRD_API_ENDPOINT = os.environ.get('TB_API_ENDPOINT', 'https://api.tinybird.co/v0/')
 TINYBIRD_DS_PREFIX = os.environ.get('TB_DS_PREFIX') or 'ddb_'
 TINYBIRD_SKIP_TABLE_CHECK = os.environ.get('TB_SKIP_TABLE_CHECK', 'False').lower() in ['true', '1', 't', 'yes', 'y']
+TINYBIRD_KEY_PREFIX = os.environ.get('TB_KEY_PREFIX', 'key_')
 BATCH_SIZE = int(os.environ.get('TB_BATCH_SIZE', 250))  # Conservative default
 REGION = os.environ.get('AWS_REGION', 'eu-west-1')
 MAX_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10MB to Tinybird. Max from DDB is about 6Mb.
+MAX_NAME_LENGTH = 128 # Maximum length for a Tinybird Datasource name
 TABLE_KEY_SCHEMAS = {}
+
+# Global variables for caching
+# The API Key and Tinybird Landing Table Existence are cached for the duration of the Lambda execution
+GLOBAL_CACHE = {}
+CACHE_EXPIRATION = 300  # 5 minutes
+
+def get_from_cache(key):
+    if key in GLOBAL_CACHE:
+        value, timestamp = GLOBAL_CACHE[key]
+        if time.time() - timestamp < CACHE_EXPIRATION:
+            return value
+    return None
+
+def set_in_cache(key, value):
+    GLOBAL_CACHE[key] = (value, time.time())
 
 class DDBEncoder(json.JSONEncoder):
     def default(self, o):
@@ -55,11 +74,11 @@ def lambda_handler(event, context):
         TINYBIRD_API_KEY = get_tinybird_api_key()
         if 'Records' in event:
             if 's3' in event['Records'][0]:
-                logger.info(f"Processing event type S3: {json.dumps(event)}")
+                logger.debug(f"Processing event type S3: {json.dumps(event)}")
                 s3_conditional_setup()
-                process_s3_event(event, context)
+                process_s3_event(event)
             elif 'dynamodb' in event['Records'][0]:
-                logger.info(f"Processing event type DDBStream: {json.dumps(event)}")
+                logger.debug(f"Processing event type DDBStream: {json.dumps(event)}")
                 process_dynamodb_stream_event(event)
             else:
                 logger.error("Unsupported event type")
@@ -78,83 +97,51 @@ def get_tinybird_api_key():
         raise ValueError("Tinybird API key or Secret Name not found in environment variables. See readme for instructions.")
 
     # If not found in environment variables, fetch from Secrets Manager
-    try:
-        secrets_client = boto3.client('secretsmanager')
-        logger.info(f"Fetching Tinybird API key from Secrets Manager: {TINYBIRD_API_KEY_FROM_SECRET}")
-        response = secrets_client.get_secret_value(SecretId=TINYBIRD_API_KEY_FROM_SECRET)
-        if 'SecretString' in response:
-            secret = json.loads(response['SecretString'])
-            api_key = secret.get(TINYBIRD_API_KEY_SECRET_KEY_NAME)
-            if not api_key:
-                logger.error("API key not found in the secret")
-                raise ValueError("API key not found in the secret")
-            logger.info("Using Tinybird API key from Secrets Manager")
-            return api_key
-        else:
-            logger.error("Secret value not found in the expected format")
-            raise ValueError("Secret value not found in the expected format")
-    except ClientError as e:
-        if e.response['Error']['Code'] == 'ResourceNotFoundException':
-            logger.error(f"The secret {TINYBIRD_API_KEY_FROM_SECRET} was not found")
-        else:
-            logger.error(f"Error fetching secret: {str(e)}")
-        raise
+    if cached_secret := get_from_cache(TINYBIRD_API_KEY_SECRET_KEY_NAME):
+        logger.info("Using Tinybird API key from cache")
+        return cached_secret
+    else:
+        try:
+            secrets_client = boto3.client('secretsmanager')
+            logger.info(f"Fetching Tinybird API key from Secrets Manager: {TINYBIRD_API_KEY_FROM_SECRET}")
+            response = secrets_client.get_secret_value(SecretId=TINYBIRD_API_KEY_FROM_SECRET)
+            if 'SecretString' in response:
+                secret = json.loads(response['SecretString'])
+                api_key = secret.get(TINYBIRD_API_KEY_SECRET_KEY_NAME)
+                if not api_key:
+                    logger.error("API key not found in the secret")
+                    raise ValueError("API key not found in the secret")
+                logger.info("Using Tinybird API key from Secrets Manager - updating cache and returning")
+                set_in_cache(TINYBIRD_API_KEY_SECRET_KEY_NAME, api_key)
+                return api_key
+            else:
+                logger.error("Secret value not found in the expected format")
+                raise ValueError("Secret value not found in the expected format")
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'ResourceNotFoundException':
+                logger.error(f"The secret {TINYBIRD_API_KEY_FROM_SECRET} was not found")
+            else:
+                logger.error(f"Error fetching secret: {str(e)}")
+            raise
 
-def process_s3_event(event, context):
-    account_id = context.invoked_function_arn.split(":")[4]
+def process_s3_event(event):
     for record in event['Records']:
         bucket = record['s3']['bucket']['name']
         key = record['s3']['object']['key']
+
         # If the customer hasn't filtered by .gz in the Lambda Trigger, this will catch it.
         if key.endswith('.gz'):
-            process_export_file(bucket, key, account_id)
+            process_export_file(bucket, key)
         else:
             logger.info(f"Skipping non-gzipped file: {key}")
 
-def extract_table_name_from_record(record):
-    return record['eventSourceARN'].split(':table/')[1].split('/')[0]
-
-def process_dynamodb_stream_event(event):
-    if records := event.get("Records"):
-        ndjson_records, key_types = create_ndjson_records(records)
-        post_records_batch(ndjson_records, key_types)
-    else:
-        logger.info("No records to process")
-
-def extract_table_name_from_s3_key(key):
-    parts = key.split('/')
-    try:
-        # This assumes the User has followed instructions to include the table name at the end of the S3 Prefix
-        aws_dynamodb_index = parts.index('AWSDynamoDB')
-        if aws_dynamodb_index > 0:
-            return parts[aws_dynamodb_index - 1]
-    except ValueError:
-        pass  # 'AWSDynamoDB' not found in the key, this should never happen.
-    
-    logger.warning(f"Unable to extract table name from S3 key: {key}")
-    return None
-
-def from_dynamodb_to_json(item):
-    return {k: __deserialize(v) for k, v in item.items()}
-
-def __deserialize(value):
-    dynamodb_type = list(value.keys())[0]
-    
-    # DynamoDB stream base64-encodes all binary types, must base64 decode first for consistency
-    if dynamodb_type == "B" and isinstance(value["B"], str):
-        value = {"B": base64.b64decode(value["B"])}
-    
-    return deserializer.deserialize(value)
-
-def process_export_file(bucket, key, account_id):
-    logger.debug(f"Processing file {key} for bucket {bucket}")
+def process_export_file(bucket, key):
+    logger.debug(f"Processing {bucket} having {key}")
     response = s3.get_object(Bucket=bucket, Key=key)
-    export_time = get_export_time(response)
-    table_name = extract_table_name_from_s3_key(key)
-    if table_name is None:
-        raise ValueError(f"Unable to process file {key}: Could not extract table name")
-    logger.debug(f"Details for S3 Export time: {export_time}, Table name: {table_name}")
-    
+    # We need to get the table name from the manifest file as it's not in the data
+    manifest_key = get_manifest_key(bucket, key)
+    table_arn, export_time = get_snapshot_info_from_manifest(bucket, manifest_key)
+    table_name, account_id = get_ddb_table_info_from_arn(table_arn)
     batch = []
     batch_size = 0
     key_types = {}
@@ -185,14 +172,66 @@ def process_export_file(bucket, key, account_id):
         logger.error(f"Unexpected error processing file {key}: {str(e)}")
         raise e
 
-def get_export_time(response):
-    # It would be better to get the Point-in-Time export time from the metadata, but it's not always available
-    export_time = response.get('Metadata', {}).get('exportTime')
-    if export_time:
-        return int(datetime.strptime(export_time, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp())
-    return int(response['LastModified'].timestamp())
+def get_snapshot_info_from_manifest(bucket, manifest_key):
+    try:
+        response = s3.get_object(Bucket=bucket, Key=manifest_key)
+    except Exception as e:
+        logger.error(f"Error reading manifest file {manifest_key}: {str(e)}")
+        raise e
+    manifest = json.loads(response['Body'].read().decode('utf-8'))
+    table_arn = manifest.get('tableArn')
+    export_datetime = manifest.get('exportTime')
+    export_timestamp = int(datetime.strptime(export_datetime, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp())
+    logger.debug(f"Extracted Table ARN: {table_arn}, Export Time: {export_datetime}")
+    return table_arn, export_timestamp
 
-def get_table_info(table_name):
+def get_manifest_key(bucket, data_file_key):
+    manifest_key = '/'.join(data_file_key.split('/')[:-2] + ['manifest-summary.json'])
+    logger.debug(f"Checking for manifest file: {manifest_key}")
+    
+    # Check if the manifest file exists
+    try:
+        s3.head_object(Bucket=bucket, Key=manifest_key)
+        logger.debug(f"Manifest file found for data file: {data_file_key}")
+        return manifest_key
+    except s3.exceptions.ClientError as e:
+        logger.error(f"Manifest file not found for data file: {data_file_key}: {str(e)}")
+
+def get_ddb_table_info_from_arn(table_arn):
+    # arn like arn:aws:dynamodb:eu-west-2:819314934727:table/PeopleTable
+    table_name = table_arn.split("/")[-1]
+    account_id = table_arn.split(":")[4]
+    logger.debug(f"Extracted Table name: {table_name}, Account ID: {account_id}")
+    if table_name is None or account_id is None:
+        raise ValueError(f"Table name or Account ID cannot be empty, could not extract from {table_arn}")
+    return table_name, account_id
+
+def extract_table_name_from_record(record):
+    value = record['eventSourceARN'].split(':table/')[1].split('/')[0]
+    if not value:
+        raise ValueError(f"DynamoDB Table name cannot be empty, could not extract from {record['eventSourceARN']}")
+    return value
+
+def process_dynamodb_stream_event(event):
+    if records := event.get("Records"):
+        ndjson_records, key_types = create_ndjson_records(records)
+        post_records_batch(ndjson_records, key_types)
+    else:
+        logger.info("No records to process")
+
+def from_dynamodb_to_json(item):
+    return {k: __deserialize(v) for k, v in item.items()}
+
+def __deserialize(value):
+    dynamodb_type = list(value.keys())[0]
+    
+    # DynamoDB stream base64-encodes all binary types, must base64 decode first for consistency
+    if dynamodb_type == "B" and isinstance(value["B"], str):
+        value = {"B": base64.b64decode(value["B"])}
+    
+    return deserializer.deserialize(value)
+
+def get_ddb_table_schema(table_name):
     """Used for the S3 pathway to get Key information for generating the events."""
     if table_name in TABLE_KEY_SCHEMAS:
         return TABLE_KEY_SCHEMAS[table_name]
@@ -210,7 +249,7 @@ def get_table_info(table_name):
 
 def create_stream_event(item, account_id, export_time, table_name):
     # For S3 pathway, we need to get the table info to extract the keys
-    table_info = get_table_info(table_name)
+    table_info = get_ddb_table_schema(table_name)
     keys = {attr_name: item['Item'][attr_name] for attr_name in table_info['KeySchema'] if attr_name in item['Item']}
     
     event = {
@@ -237,40 +276,67 @@ def create_ndjson_records(records):
         return [], {}
 
     key_types = {}
+    ndjson_records = []
 
-    def extract_key_values(record):
+    for record in records:
         keys = record["dynamodb"].get("Keys", {})
+        extracted_keys = {}
         for k, v in keys.items():
-            if f"key_{k}" not in key_types:
-                key_types[f"key_{k}"] = list(v.keys())[0]
-        return {f"key_{k}": __deserialize(v) for k, v in keys.items()}
+            key_name = ddb_name_to_tinybird_name(k, TINYBIRD_KEY_PREFIX)
+            if key_name not in key_types:
+                key_types[key_name] = list(v.keys())[0]
+            extracted_keys[key_name] = __deserialize(v)
 
-    ndjson_records = [{
-        "eventID": record["eventID"],
-        "eventName": record["eventName"],
-        "eventSource": record["eventSource"],
-        "eventSourceARN": record["eventSourceARN"],
-        "eventVersion": float(record["eventVersion"]),
-        "awsRegion": record["awsRegion"],
-        "ApproximateCreationDateTime": int(record["dynamodb"].get("ApproximateCreationDateTime", 0)),
-        "SequenceNumber": record["dynamodb"].get("SequenceNumber", ""),
-        "SizeBytes": int(record["dynamodb"].get("SizeBytes", 0)),
-        "StreamViewType": record["dynamodb"].get("StreamViewType", ""),
-        "Keys": json.dumps(from_dynamodb_to_json(record["dynamodb"].get("Keys", {})), cls=DDBEncoder),
-        "NewImage": json.dumps(from_dynamodb_to_json(record["dynamodb"].get("NewImage", {})), cls=DDBEncoder),
-        "OldImage": json.dumps(from_dynamodb_to_json(record["dynamodb"].get("OldImage", {})), cls=DDBEncoder),
-        **extract_key_values(record)
-    } for record in records]
+        ndjson_record = {
+            "eventID": record["eventID"],
+            "eventName": record["eventName"],
+            "eventSource": record["eventSource"],
+            "eventSourceARN": record["eventSourceARN"],
+            "eventVersion": float(record["eventVersion"]),
+            "awsRegion": record["awsRegion"],
+            "ApproximateCreationDateTime": int(record["dynamodb"].get("ApproximateCreationDateTime", 0)),
+            "SequenceNumber": record["dynamodb"].get("SequenceNumber", ""),
+            "SizeBytes": int(record["dynamodb"].get("SizeBytes", 0)),
+            "StreamViewType": record["dynamodb"].get("StreamViewType", ""),
+            "Keys": json.dumps(from_dynamodb_to_json(record["dynamodb"].get("Keys", {})), cls=DDBEncoder),
+            "NewImage": json.dumps(from_dynamodb_to_json(record["dynamodb"].get("NewImage", {})), cls=DDBEncoder),
+            "OldImage": json.dumps(from_dynamodb_to_json(record["dynamodb"].get("OldImage", {})), cls=DDBEncoder),
+            **extracted_keys
+        }
+        ndjson_records.append(ndjson_record)
+        
     logger.debug(f"Created NDJSON records: {json.dumps(ndjson_records)} with key types: {key_types}")
 
     return ndjson_records, key_types
+
+def normalize_tinybird_endpoint(endpoint):
+    # Remove any trailing slashes, strip whitespace, and convert to lowercase
+    endpoint = endpoint.rstrip('/').strip().lower()
+    
+    # Define the regex pattern to match the domain starting with 'api'
+    pattern = r'^(https?://)?(api\.([a-z0-9-]+\.)*tinybird\.co)(/.*)?$'
+    
+    # Try to match the pattern
+    match = re.search(pattern, endpoint)
+    
+    if match:
+        # Extract the core domain
+        core_domain = match.group(2)
+        
+        # Construct the normalized URL always using https
+        normalized_endpoint = f'https://{core_domain}/v0/'
+        
+        return normalized_endpoint
+    else:
+        raise ValueError(f"Invalid Tinybird API endpoint: {endpoint}")
 
 def call_tinybird(method, service, params, data=None):
     headers = {
         'Authorization': f'Bearer {TINYBIRD_API_KEY}',
         'Content-Type': 'application/json',
     }
-    url = urljoin(TINYBIRD_API_ENDPOINT, f"{service}?{urlencode(params)}")
+    normalized_url = normalize_tinybird_endpoint(TINYBIRD_API_ENDPOINT)
+    url = urljoin(normalized_url, f"{service}?{urlencode(params)}")
     logger.debug(f"Calling Tinybird API: {method} - {url}")
     with urllib3.PoolManager() as http:
         return http.request(
@@ -299,6 +365,11 @@ def get_default_value(ch_type):
         return "DEFAULT ''"  # Default for any other type
 
 def ensure_datasource_exists(full_table_name, key_types):
+    cache_key = f"tinybird_table_{full_table_name}"
+    cached_status = get_from_cache(cache_key)
+    if cached_status:
+        logger.info(f"Skipping Table exists check for {full_table_name} - Cache hit")
+        return
     response = call_tinybird("GET", "datasources", {"attrs": "name"})
     logger.debug(f"Tinybird API response: {response.status} - {response.data.decode('utf-8')}")
     
@@ -308,7 +379,8 @@ def ensure_datasource_exists(full_table_name, key_types):
             existing_tables = [ds['name'] for ds in datasources]
             
             if full_table_name in existing_tables:
-                logger.info(f"Table {full_table_name} already exists")
+                logger.info(f"Table {full_table_name} already exists - updating cache and returning")
+                set_in_cache(cache_key, "datasource_exists")
                 return
             else:
                 logger.info(f"Table {full_table_name} does not exist, creating it now")
@@ -362,9 +434,34 @@ def ensure_datasource_exists(full_table_name, key_types):
     else:
         logger.info(f"Tinybird API response: {create_response.status} - {create_response.data.decode('utf-8')}")
 
+def ddb_name_to_tinybird_name(ddb_value, tb_prefix=None):
+    # Tinybird requires a Datasource name to start with a letter and contain only lowercase letters, numbers, and underscores
+    # it also cannot be a reserved word, which the prefix will prevent
+    # DynamoDb additionally allows some characters like . and - in names, but Tinybird does not.
+    # https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.NamingRulesDataTypes.html
+
+    # Replace invalid characters with underscores
+    out_value = re.sub(r'[^a-zA-Z0-9_]', '_', ddb_value)
+    
+    if tb_prefix:
+        # Ensure prefix isn't empty and starts with a letter and uses valid characters, or use default prefix
+        if not tb_prefix or not tb_prefix[0].isalpha():
+            logger.warning(f"Configured Prefix {tb_prefix} does not start with a letter, using default 'ddb_'")
+            prefix = 'ddb_'
+        else:
+            prefix = re.sub(r'[^a-zA-Z0-9_]', '_', tb_prefix)
+            # ensure the prefix has a trailing underscore
+            prefix = f"{prefix}_" if prefix[-1] != '_' else prefix
+        out_value = f"{prefix}{out_value}"
+    
+    # Remove consecutive underscores and trailing underscores and truncate to maximum allowed length
+    out_value = re.sub(r'_+', '_', out_value).rstrip('_')[:MAX_NAME_LENGTH]
+    logger.debug(f"Converted DynamoDB Name {ddb_value} with prefix {tb_prefix} to Tinybird name {out_value}")
+    return out_value
+
 def post_records_batch(records, key_types):
     base_table_name = extract_table_name_from_record(records[0])
-    full_table_name = TINYBIRD_DS_PREFIX + base_table_name
+    full_table_name = ddb_name_to_tinybird_name(base_table_name, TINYBIRD_DS_PREFIX)
     
     if not TINYBIRD_SKIP_TABLE_CHECK:
         ensure_datasource_exists(full_table_name, key_types)
