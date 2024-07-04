@@ -7,7 +7,7 @@ This README outlines the process of setting up a Change Data Capture (CDC) syste
 * Once configured, the Lambda will automatically forward any updates to the included DynamoDB tables to Tinybird Datasources matching the same name with an optional prefix. 
 * The Tinybird Datasource will be automatically created with an appropriate schema. 
 * You can trigger a DynamoDB Snapshot to (re)initialize the export, and the Streams configuration will keep it up to date.
-* The Tinybird Datasource will automatically index the existing DynamoDB Keys, the rest of each Record will be provided as plain JSON ready for further processing.
+* The Tinybird Datasource will automatically index the existing DynamoDB Primary Keys and Sorting Keys, the rest of each Record will be provided as plain JSON ready for further processing.
 * You can deploy an example Materialized View to query the test data
 * Structure: DynamoDB, IAM (Role and Policy) >> S3, Lambda, Secrets Manager >> Tinybird
 * Management functions are provided in utils.py to cover a large number of deployment and operational requirements, including full deploy or teardown of a test case.
@@ -17,10 +17,10 @@ This README outlines the process of setting up a Change Data Capture (CDC) syste
 1. The DynamoDB Streams service only keeps events for 24hours. If this service is somehow down for longer than that, your data will be stale and you should create a new Snapshot to reinitialize the Tinybird table. Some users choose to do this nightly as a precautionary measure.
 2. Binary data in the DynamoDB table is exported in base64 encoded form as we cannot have certainty that it will be String-like or some other format. The user may make determination in processing downstream.
 3. We use the exportTime of the Export to S3 Point-in-time Backup from the DynamoDB table to simulate the ApproximateCreationDateTime you get from a DynamoDB Stream CDC event. This should ensure that any changes made after the Snapshot is issued will be applied in order to the destination Tinybird Datasource during deduplication.
-4. Batch sizes are largely configurable in the Lambda Trigger for the number of DDBStreams events to collect in each Trigger, and the amount of time to wait before invoking if enough events haven't arrived. This should give users good control over latency vs efficiency during the CDC replication stage of the processing.
+4. Batch sizes are largely configurable in the Lambda Trigger for the number of DDBStreams events to collect in each Trigger, and the amount of time to wait before invoking if enough events haven't arrived. This should give users good control over latency vs cost efficiency during the CDC replication stage of the processing.
 5. We do not automatically index DynamoDB GSIs. This is largely because they are not provided in the Stream event, and it would be an expensive operation to fetch the DynamoDB Table Description for them during every Invocation.
-6. The example Materialized View is deliberately simple to aid education, please contact us if you want to discuss more complex or high volume use cases.
-7. We use Lambda Triggers to receive and process data from the DynamoDB Stream feature. As of writing this only works within the same AWS Account and Region.
+6. The example Materialized View is deliberately simple to aid education, please see [Tinybird docs](https://www.tinybird.co/docs) or [contact us](hi@tinybird.co) if you want to discuss more complex or high volume use cases.
+7. We use Lambda Triggers to receive and process data from the DynamoDB Stream feature. As of writing this only works if all services are within the same AWS Account and Region.
 
 ## Manual Deployment
 
@@ -58,6 +58,8 @@ You can either use a set of standard AWS Policies, or create your own from the p
   * arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess,
   * arn:aws:iam::aws:policy/SecretsManagerReadWrite
 
+Note that the provided utils script uses the Default AWS policies.
+
 #### Create your own Policy
 1. Navigate to IAM in the AWS Console.
 2. Create a new Policy for the Lambda.
@@ -79,7 +81,7 @@ You can either use a set of standard AWS Policies, or create your own from the p
 2. Name it something memorable, such as "TinybirdDynamoCDC".
 3. Choose Python 3.10 as the runtime.
 4. Set the architecture to x86_64.
-5. Set the timeout to 1 minute.
+5. Set the timeout to 5 minutes.
 6. Assign the IAM role created in step 1.
 7. Use the code from TinyDynamoCDC.py for the function.
 8. Deploy the function.
@@ -112,7 +114,7 @@ You have two options:
 3. Select your S3 bucket.
 4. Set the event type to "All object create events".
 5. Add .gz as the suffix so non-data files do not trigger the lambda
-6. Add the prefix `DDBStreamCDC` to collect all your exports into a common folder. Note that this prefix is also used in the createSnapshot.sh script if you want to change it.
+6. Add the prefix `DDBStreamCDC` to collect all your exports into a common folder. Note that this prefix is also used in the utils script if you want to change it.
 7. Set the Destination as your Lambda Function ARN.
 
 ### 7. Add DynamoDB Trigger(s)
@@ -128,9 +130,11 @@ You have two options:
     * Split batch on error: Yes
 5. Repeat for each source DynamoDB Table to be replicated.
 
+Note that the Lambda will send data whenever the first limit is breeched, which could be Batch Size, Batch Window, Data size over 6Mb or Lambda Timeout.
+Reduce the Window for reduced latency at higher costs.
+
 ### 8. Create Initial Snapshot
 1. Use the UI or the provided utils.py script to generate an initial snapshot of the DynamoDB table. This can also act as an initial deployment test.
-2. Note that the Lambda Event handler relies on the DynamoDB Table name to be included in the s3 object key as a part of the prefix. This is automatically included if you use the supplied example scripts.
 
 ### 10. [Optional] Set Up Alerting
 
@@ -152,6 +156,41 @@ We have spent time on a number of deployment and operational utilities to aid yo
 4. Install the requirements.txt within your Python interpreter or VirtualEnv.
 5. Execute `python3 utils.py --help` to see the options.
 6. Many defaults are set at the top of utils.py, or can be passed in as args.
+
+```bash
+DynamoDB Streams CDC Test Table Manager
+
+options:
+  -h, --help            show this help message and exit
+  --create              Create the entire Test Infrastructure with default settings
+  --remove              Remove the entire Test Infrastructure
+  --overwrite           Delete and recreate objects if they already exist
+  --create-snapshot     Create a snapshot of the table
+  --upload-batch Int    Upload (Int) fake records to the table
+  --modify-record       Modify a random record
+  --remove-record       Remove a random record
+  --create-ddb-table    Create a test DynamoDB table
+  --remove-ddb-table    Remove a test DynamoDB table
+  --create-ddb-trigger  Create DynamoDB Stream trigger for Lambda
+  --remove-ddb-trigger  Remove DynamoDB Stream trigger for Lambda
+  --create-s3-trigger   Create S3 trigger for Lambda
+  --remove-s3-trigger   Remove S3 trigger for Lambda
+  --create-lambda       Create Lambda function
+  --remove-lambda       Remove Lambda function
+  --update-lambda       Update Lambda function code
+  --create-mv           Create example Materialized View in Tinybird
+  --remove-mv           Remove example Materialized View in Tinybird
+  --infer-schema        Infer schema for Materialized View from landing Datasource (default False)
+  --table-name Str      Name of the DynamoDB table (default: PeopleTable)
+  --region Str          AWS region of the DynamoDB table (default: eu-west-2)
+  --s3-bucket Str       S3 bucket for export (default: tinybird-test-dynamodb-export)
+  --s3-prefix Str       S3 prefix for export (default: DDBStreamCDC)
+  --lambda-arn Str      ARN of the Lambda function for DynamoDB streams
+  --lambda-name Str     Name of the Lambda function (default: DDBStreamCDC-LambdaFunction)
+  --lambda-role Str     Name of the IAM role for Lambda (default: DDBStreamCDC-LambdaRole)
+  --lambda-secret Str   Name of the secret for Tinybird API key (default: DDBStreamCDC-TinybirdSecret)
+  --lambda-timeout Int  Timeout in seconds for the Lambda function (default: 300)
+```
 
 ## Testing
 After setting up the system, you can test it by:

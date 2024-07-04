@@ -23,7 +23,7 @@ def s3_conditional_setup():
     dynamodb = boto3.client('dynamodb')
 
 # Setup Logging
-logger = getLogger()
+logger = getLogger('DDBStreamCDC')
 logger.setLevel(os.environ.get("LOGGING_LEVEL") or INFO)
 
 deserializer = TypeDeserializer()
@@ -74,11 +74,11 @@ def lambda_handler(event, context):
         TINYBIRD_API_KEY = get_tinybird_api_key()
         if 'Records' in event:
             if 's3' in event['Records'][0]:
-                logger.info(f"Processing event type S3: {json.dumps(event)}")
+                logger.debug(f"Processing event type S3: {json.dumps(event)}")
                 s3_conditional_setup()
-                process_s3_event(event, context)
+                process_s3_event(event)
             elif 'dynamodb' in event['Records'][0]:
-                logger.info(f"Processing event type DDBStream: {json.dumps(event)}")
+                logger.debug(f"Processing event type DDBStream: {json.dumps(event)}")
                 process_dynamodb_stream_event(event)
             else:
                 logger.error("Unsupported event type")
@@ -124,64 +124,24 @@ def get_tinybird_api_key():
                 logger.error(f"Error fetching secret: {str(e)}")
             raise
 
-def process_s3_event(event, context):
-    account_id = context.invoked_function_arn.split(":")[4]
+def process_s3_event(event):
     for record in event['Records']:
         bucket = record['s3']['bucket']['name']
         key = record['s3']['object']['key']
+
         # If the customer hasn't filtered by .gz in the Lambda Trigger, this will catch it.
         if key.endswith('.gz'):
-            process_export_file(bucket, key, account_id)
+            process_export_file(bucket, key)
         else:
             logger.info(f"Skipping non-gzipped file: {key}")
 
-def extract_table_name_from_record(record):
-    value = record['eventSourceARN'].split(':table/')[1].split('/')[0]
-    if not value:
-        raise ValueError(f"DynamoDB Table name cannot be empty, could not extract from {record['eventSourceARN']}")
-    return value
-
-def process_dynamodb_stream_event(event):
-    if records := event.get("Records"):
-        ndjson_records, key_types = create_ndjson_records(records)
-        post_records_batch(ndjson_records, key_types)
-    else:
-        logger.info("No records to process")
-
-def extract_table_name_from_s3_key(key):
-    parts = key.split('/')
-    try:
-        # This assumes the User has followed instructions to include the table name at the end of the S3 Prefix
-        aws_dynamodb_index = parts.index('AWSDynamoDB')
-        if aws_dynamodb_index > 0:
-            return parts[aws_dynamodb_index - 1]
-    except ValueError:
-        pass  # 'AWSDynamoDB' not found in the key, this should never happen.
-    
-    logger.warning(f"Unable to extract table name from S3 key: {key}")
-    return None
-
-def from_dynamodb_to_json(item):
-    return {k: __deserialize(v) for k, v in item.items()}
-
-def __deserialize(value):
-    dynamodb_type = list(value.keys())[0]
-    
-    # DynamoDB stream base64-encodes all binary types, must base64 decode first for consistency
-    if dynamodb_type == "B" and isinstance(value["B"], str):
-        value = {"B": base64.b64decode(value["B"])}
-    
-    return deserializer.deserialize(value)
-
-def process_export_file(bucket, key, account_id):
-    logger.debug(f"Processing file {key} for bucket {bucket}")
+def process_export_file(bucket, key):
+    logger.debug(f"Processing {bucket} having {key}")
     response = s3.get_object(Bucket=bucket, Key=key)
-    export_time = get_export_time(response)
-    table_name = extract_table_name_from_s3_key(key)
-    if table_name is None:
-        raise ValueError(f"Unable to process file {key}: Could not extract table name")
-    logger.debug(f"Details for S3 Export time: {export_time}, Table name: {table_name}")
-    
+    # We need to get the table name from the manifest file as it's not in the data
+    manifest_key = get_manifest_key(bucket, key)
+    table_arn, export_time = get_snapshot_info_from_manifest(bucket, manifest_key)
+    table_name, account_id = get_ddb_table_info_from_arn(table_arn)
     batch = []
     batch_size = 0
     key_types = {}
@@ -212,14 +172,66 @@ def process_export_file(bucket, key, account_id):
         logger.error(f"Unexpected error processing file {key}: {str(e)}")
         raise e
 
-def get_export_time(response):
-    # It would be better to get the Point-in-Time export time from the metadata, but it's not always available
-    export_time = response.get('Metadata', {}).get('exportTime')
-    if export_time:
-        return int(datetime.strptime(export_time, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp())
-    return int(response['LastModified'].timestamp())
+def get_snapshot_info_from_manifest(bucket, manifest_key):
+    try:
+        response = s3.get_object(Bucket=bucket, Key=manifest_key)
+    except Exception as e:
+        logger.error(f"Error reading manifest file {manifest_key}: {str(e)}")
+        raise e
+    manifest = json.loads(response['Body'].read().decode('utf-8'))
+    table_arn = manifest.get('tableArn')
+    export_datetime = manifest.get('exportTime')
+    export_timestamp = int(datetime.strptime(export_datetime, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp())
+    logger.debug(f"Extracted Table ARN: {table_arn}, Export Time: {export_datetime}")
+    return table_arn, export_timestamp
 
-def get_table_info(table_name):
+def get_manifest_key(bucket, data_file_key):
+    manifest_key = '/'.join(data_file_key.split('/')[:-2] + ['manifest-summary.json'])
+    logger.debug(f"Checking for manifest file: {manifest_key}")
+    
+    # Check if the manifest file exists
+    try:
+        s3.head_object(Bucket=bucket, Key=manifest_key)
+        logger.debug(f"Manifest file found for data file: {data_file_key}")
+        return manifest_key
+    except s3.exceptions.ClientError as e:
+        logger.error(f"Manifest file not found for data file: {data_file_key}: {str(e)}")
+
+def get_ddb_table_info_from_arn(table_arn):
+    # arn like arn:aws:dynamodb:eu-west-2:819314934727:table/PeopleTable
+    table_name = table_arn.split("/")[-1]
+    account_id = table_arn.split(":")[4]
+    logger.debug(f"Extracted Table name: {table_name}, Account ID: {account_id}")
+    if table_name is None or account_id is None:
+        raise ValueError(f"Table name or Account ID cannot be empty, could not extract from {table_arn}")
+    return table_name, account_id
+
+def extract_table_name_from_record(record):
+    value = record['eventSourceARN'].split(':table/')[1].split('/')[0]
+    if not value:
+        raise ValueError(f"DynamoDB Table name cannot be empty, could not extract from {record['eventSourceARN']}")
+    return value
+
+def process_dynamodb_stream_event(event):
+    if records := event.get("Records"):
+        ndjson_records, key_types = create_ndjson_records(records)
+        post_records_batch(ndjson_records, key_types)
+    else:
+        logger.info("No records to process")
+
+def from_dynamodb_to_json(item):
+    return {k: __deserialize(v) for k, v in item.items()}
+
+def __deserialize(value):
+    dynamodb_type = list(value.keys())[0]
+    
+    # DynamoDB stream base64-encodes all binary types, must base64 decode first for consistency
+    if dynamodb_type == "B" and isinstance(value["B"], str):
+        value = {"B": base64.b64decode(value["B"])}
+    
+    return deserializer.deserialize(value)
+
+def get_ddb_table_schema(table_name):
     """Used for the S3 pathway to get Key information for generating the events."""
     if table_name in TABLE_KEY_SCHEMAS:
         return TABLE_KEY_SCHEMAS[table_name]
@@ -237,7 +249,7 @@ def get_table_info(table_name):
 
 def create_stream_event(item, account_id, export_time, table_name):
     # For S3 pathway, we need to get the table info to extract the keys
-    table_info = get_table_info(table_name)
+    table_info = get_ddb_table_schema(table_name)
     keys = {attr_name: item['Item'][attr_name] for attr_name in table_info['KeySchema'] if attr_name in item['Item']}
     
     event = {
@@ -264,33 +276,35 @@ def create_ndjson_records(records):
         return [], {}
 
     key_types = {}
+    ndjson_records = []
 
-    def extract_key_values(record):
+    for record in records:
         keys = record["dynamodb"].get("Keys", {})
-        out = {}
+        extracted_keys = {}
         for k, v in keys.items():
             key_name = ddb_name_to_tinybird_name(k, TINYBIRD_KEY_PREFIX)
             if key_name not in key_types:
                 key_types[key_name] = list(v.keys())[0]
-            out[key_name] = __deserialize(v)
-        return out
+            extracted_keys[key_name] = __deserialize(v)
 
-    ndjson_records = [{
-        "eventID": record["eventID"],
-        "eventName": record["eventName"],
-        "eventSource": record["eventSource"],
-        "eventSourceARN": record["eventSourceARN"],
-        "eventVersion": float(record["eventVersion"]),
-        "awsRegion": record["awsRegion"],
-        "ApproximateCreationDateTime": int(record["dynamodb"].get("ApproximateCreationDateTime", 0)),
-        "SequenceNumber": record["dynamodb"].get("SequenceNumber", ""),
-        "SizeBytes": int(record["dynamodb"].get("SizeBytes", 0)),
-        "StreamViewType": record["dynamodb"].get("StreamViewType", ""),
-        "Keys": json.dumps(from_dynamodb_to_json(record["dynamodb"].get("Keys", {})), cls=DDBEncoder),
-        "NewImage": json.dumps(from_dynamodb_to_json(record["dynamodb"].get("NewImage", {})), cls=DDBEncoder),
-        "OldImage": json.dumps(from_dynamodb_to_json(record["dynamodb"].get("OldImage", {})), cls=DDBEncoder),
-        **extract_key_values(record)
-    } for record in records]
+        ndjson_record = {
+            "eventID": record["eventID"],
+            "eventName": record["eventName"],
+            "eventSource": record["eventSource"],
+            "eventSourceARN": record["eventSourceARN"],
+            "eventVersion": float(record["eventVersion"]),
+            "awsRegion": record["awsRegion"],
+            "ApproximateCreationDateTime": int(record["dynamodb"].get("ApproximateCreationDateTime", 0)),
+            "SequenceNumber": record["dynamodb"].get("SequenceNumber", ""),
+            "SizeBytes": int(record["dynamodb"].get("SizeBytes", 0)),
+            "StreamViewType": record["dynamodb"].get("StreamViewType", ""),
+            "Keys": json.dumps(from_dynamodb_to_json(record["dynamodb"].get("Keys", {})), cls=DDBEncoder),
+            "NewImage": json.dumps(from_dynamodb_to_json(record["dynamodb"].get("NewImage", {})), cls=DDBEncoder),
+            "OldImage": json.dumps(from_dynamodb_to_json(record["dynamodb"].get("OldImage", {})), cls=DDBEncoder),
+            **extracted_keys
+        }
+        ndjson_records.append(ndjson_record)
+        
     logger.debug(f"Created NDJSON records: {json.dumps(ndjson_records)} with key types: {key_types}")
 
     return ndjson_records, key_types

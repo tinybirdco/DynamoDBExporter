@@ -1059,7 +1059,7 @@ def main():
     parser.add_argument("--overwrite", action="store_true", help="Delete and recreate objects if they already exist")
     parser.add_argument("--create-snapshot", action="store_true", help="Create a snapshot of the table")
 
-    parser.add_argument("--upload-batch", type=int, metavar="N",help=f"Upload N fake records to the table")
+    parser.add_argument("--upload-batch", type=int, metavar="Int",help=f"Upload (Int) fake records to the table")
     parser.add_argument("--modify-record", action="store_true", help="Modify a random record")
     parser.add_argument("--remove-record", action="store_true", help="Remove a random record")
 
@@ -1076,15 +1076,15 @@ def main():
     parser.add_argument("--remove-mv", action="store_true", help="Remove example Materialized View in Tinybird")
     parser.add_argument("--infer-schema", action="store_true", help="Infer schema for Materialized View from landing Datasource (default False)")
 
-    parser.add_argument("--table-name", default=DEFAULT_TABLE_NAME, help=f"Name of the DynamoDB table (default: {DEFAULT_TABLE_NAME})")
-    parser.add_argument("--region", default=DEFAULT_REGION, help=f"AWS region of the DynamoDB table (default: {DEFAULT_REGION})")
-    parser.add_argument("--s3-bucket", default=DEFAULT_S3_BUCKET, help=f"S3 bucket for export (default: {DEFAULT_S3_BUCKET})")
-    parser.add_argument("--s3-prefix", default=DEFAULT_S3_PREFIX, help=f"S3 prefix for export (default: {DEFAULT_S3_PREFIX})")
-    parser.add_argument("--lambda-arn", help="ARN of the Lambda function for DynamoDB streams")
-    parser.add_argument("--lambda-name", default=DEFAULT_LAMBDA_FUNCTION_NAME, help=f"Name of the Lambda function (default: {DEFAULT_LAMBDA_FUNCTION_NAME})")
-    parser.add_argument("--lambda-role", default=DEFAULT_LAMBDA_ROLE_NAME, help=f"Name of the IAM role for Lambda (default: {DEFAULT_LAMBDA_ROLE_NAME})")
-    parser.add_argument("--lambda-secret", default=DEFAULT_SECRET_NAME, help=f"Name of the secret for Tinybird API key (default: {DEFAULT_SECRET_NAME})")
-    parser.add_argument("--lambda-timeout", type=int, default=DEFAULT_LAMBDA_TIMEOUT, help=f"Timeout in seconds for the Lambda function (default: {DEFAULT_LAMBDA_TIMEOUT})")
+    parser.add_argument("--table-name", default=DEFAULT_TABLE_NAME, metavar="Str", help=f"Name of the DynamoDB table (default: {DEFAULT_TABLE_NAME})")
+    parser.add_argument("--region", default=DEFAULT_REGION, metavar="Str", help=f"AWS region of the DynamoDB table (default: {DEFAULT_REGION})")
+    parser.add_argument("--s3-bucket", default=DEFAULT_S3_BUCKET, metavar="Str", help=f"S3 bucket for export (default: {DEFAULT_S3_BUCKET})")
+    parser.add_argument("--s3-prefix", default=DEFAULT_S3_PREFIX, metavar="Str", help=f"S3 prefix for export (default: {DEFAULT_S3_PREFIX})")
+    parser.add_argument("--lambda-arn", metavar="Str", help="ARN of the Lambda function for DynamoDB streams")
+    parser.add_argument("--lambda-name", default=DEFAULT_LAMBDA_FUNCTION_NAME, metavar="Str", help=f"Name of the Lambda function (default: {DEFAULT_LAMBDA_FUNCTION_NAME})")
+    parser.add_argument("--lambda-role", default=DEFAULT_LAMBDA_ROLE_NAME, metavar="Str", help=f"Name of the IAM role for Lambda (default: {DEFAULT_LAMBDA_ROLE_NAME})")
+    parser.add_argument("--lambda-secret", default=DEFAULT_SECRET_NAME, metavar="Str", help=f"Name of the secret for Tinybird API key (default: {DEFAULT_SECRET_NAME})")
+    parser.add_argument("--lambda-timeout", type=int, default=DEFAULT_LAMBDA_TIMEOUT, metavar="Int", help=f"Timeout in seconds for the Lambda function (default: {DEFAULT_LAMBDA_TIMEOUT})")
 
     args = parser.parse_args()
 
