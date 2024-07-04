@@ -961,7 +961,8 @@ def remove_mv_from_tinybird(mv_info):
     urls = [
         f"pipes/{mv_info['mv_pipe_name']}",
         f"datasources/{mv_info['mv_table_name']}",
-        f"pipes/{mv_info['read_pipe_name']}"
+        f"pipes/{mv_info['read_pipe_name']}",
+        f"datasources/{mv_info['landing_table_name']}"
     ]
     for url in urls:
         response = call_tinybird(url, method="DELETE", params={"force": "true"}, ignore=[404])
