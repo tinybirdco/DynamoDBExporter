@@ -44,7 +44,7 @@ def get_fake():
 # Table name and structure
 DEFAULT_TABLE_NAME = "PeopleTable"
 DEFAULT_REGION = "eu-west-2"
-DEFAULT_S3_BUCKET = "jim-dynamodb-stream"
+DEFAULT_S3_BUCKET = "tinybird-test-dynamodb-export"
 DEFAULT_S3_PREFIX = "DDBStreamCDC"
 DEFAULT_LAMBDA_ROLE_NAME = "DDBStreamCDC-LambdaRole"
 DEFAULT_LAMBDA_FUNCTION_NAME = "DDBStreamCDC-LambdaFunction"

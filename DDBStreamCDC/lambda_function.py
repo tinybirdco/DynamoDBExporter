@@ -19,8 +19,11 @@ def s3_conditional_setup():
     import uuid
     from io import BytesIO
     from datetime import datetime
+    logger.debug(f"boto3 version: {boto3.__version__}")
+    logger.debug(f"S3 Pathway: Conditional imports loaded. Creating boto3 client in region {REGION}")
+    session = boto3.Session(region_name=REGION)
     s3 = boto3.client('s3')
-    dynamodb = boto3.client('dynamodb')
+    dynamodb = session.client('dynamodb')
 
 # Setup Logging
 logger = getLogger('DDBStreamCDC')
@@ -128,23 +131,67 @@ def get_tinybird_api_key():
             raise
 
 def process_s3_event(event):
-    for record in event['Records']:
-        bucket = record['s3']['bucket']['name']
-        key = record['s3']['object']['key']
-
-        # If the customer hasn't filtered by .gz in the Lambda Trigger, this will catch it.
+    for record in event.get('Records', []):
+        s3_info = record.get('s3', {})
+        bucket = s3_info.get('bucket', {}).get('name')
+        key = s3_info.get('object', {}).get('key')
+        if not bucket or not key:
+            logger.error(f"Skipping event Record with missing bucket or key: {json.dumps(record)}")
+            continue
         if key.endswith('.gz'):
             process_export_file(bucket, key)
         else:
             logger.info(f"Skipping non-gzipped file: {key}")
 
+def get_export_metadata(key):
+    match = re.search(r'^.*?/AWSDynamoDB/([^/]+)/data/.*$', key)
+    if not match:
+        raise ValueError(f"Could not extract export ID from key: {key}")
+
+    export_id = match.group(1)
+    logger.debug(f"Extracted Export ID: {export_id}")
+    cache_key = f"export_id_{export_id}"
+    
+    if cached_export := get_from_cache(cache_key):
+        logger.info(f"Skipping Export ID check for {export_id} - Cache hit of {cached_export}")
+        table_name, export_time_in_seconds, account_id = cached_export.split('#')
+        return table_name, int(export_time_in_seconds), account_id
+
+    try:
+        response = dynamodb.list_exports()
+        for export_summary in response.get('ExportSummaries', []):
+            if export_summary['ExportArn'].endswith(export_id):
+                export_arn = export_summary['ExportArn']
+                export_description = dynamodb.describe_export(ExportArn=export_arn)['ExportDescription']
+                
+                table_arn = export_description['TableArn']
+                table_name = table_arn.split("/")[-1]
+                account_id = table_arn.split(":")[4]
+                export_time = export_description['ExportTime']
+                export_time_in_seconds = int(export_time.timestamp())
+                
+                if not all([table_name, account_id, export_time_in_seconds]):
+                    raise ValueError(f"Missing required export information: {export_description}")
+                
+                result = (table_name, export_time_in_seconds, account_id)
+                set_in_cache(cache_key, '#'.join(map(str, result)))
+                logger.info(f"Export metadata found for {export_id}, cached result: {result}")
+                return result
+        
+        raise ValueError(f"No export found with ID: {export_id}")
+    except ClientError as e:
+        logger.error(f"DynamoDB ClientError for export ID {export_id}: {str(e)}")
+        raise
+
 def process_export_file(bucket, key):
-    logger.debug(f"Processing {bucket} having {key}")
+    logger.debug(f"Processing key: {key} in bucket {bucket}")
+    try:
+        table_name, export_time, account_id = get_export_metadata(key)
+    except ValueError as e:
+        logger.error(f"Error processing file {key}: {str(e)}")
+        return  # Skip this file and continue with the next
+
     response = s3.get_object(Bucket=bucket, Key=key)
-    # We need to get the table name from the manifest file as it's not in the data
-    manifest_key = get_manifest_key(bucket, key)
-    table_arn, export_time = get_snapshot_info_from_manifest(bucket, manifest_key)
-    table_name, account_id = get_ddb_table_info_from_arn(table_arn)
     batch = []
     batch_size = 0
     key_types = {}
@@ -167,6 +214,8 @@ def process_export_file(bucket, key):
         
         if batch:
             post_records_batch(batch, key_types)
+        else:
+            logger.info(f"No records to process in file {key}")
         logger.info(f"Processed file {key}")
     except (gzip.BadGzipFile, json.JSONDecodeError) as e:
         logger.error(f"Error processing file {key}: {str(e)}")
@@ -174,50 +223,6 @@ def process_export_file(bucket, key):
     except Exception as e:
         logger.error(f"Unexpected error processing file {key}: {str(e)}")
         raise e
-
-def get_snapshot_info_from_manifest(bucket, manifest_key):
-    try:
-        response = s3.get_object(Bucket=bucket, Key=manifest_key)
-    except Exception as e:
-        logger.error(f"Error reading manifest file {manifest_key}: {str(e)}")
-        raise e
-    manifest = json.loads(response['Body'].read().decode('utf-8'))
-    table_arn = manifest.get('tableArn')
-    export_datetime = manifest.get('exportTime')
-    export_timestamp = int(datetime.strptime(export_datetime, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp())
-    logger.debug(f"Extracted Table ARN: {table_arn}, Export Time: {export_datetime}")
-    return table_arn, export_timestamp
-
-def get_manifest_key(bucket, data_file_key, max_retries=5, delay=1):
-    manifest_key = '/'.join(data_file_key.split('/')[:-2] + ['manifest-summary.json'])
-    logger.debug(f"Checking for manifest file: {manifest_key}")
-    
-    for attempt in range(max_retries):
-        try:
-            s3.head_object(Bucket=bucket, Key=manifest_key)
-            logger.debug(f"Manifest file found for data file: {data_file_key}")
-            return manifest_key
-        except ClientError as e:
-            if e.response['Error']['Code'] == '404':
-                logger.warning(f"Attempt {attempt + 1}/{max_retries}: Manifest file not found for data file: {data_file_key}")
-                if attempt < max_retries - 1:
-                    time.sleep(delay * (2 ** attempt))  # Exponential backoff
-                continue
-            else:
-                logger.error(f"Error checking for manifest file: {str(e)}")
-                raise
-
-    logger.error(f"Manifest file not found after {max_retries} attempts for data file: {data_file_key}")
-    return None
-
-def get_ddb_table_info_from_arn(table_arn):
-    # arn like arn:aws:dynamodb:eu-west-2:819314934727:table/PeopleTable
-    table_name = table_arn.split("/")[-1]
-    account_id = table_arn.split(":")[4]
-    logger.debug(f"Extracted Table name: {table_name}, Account ID: {account_id}")
-    if table_name is None or account_id is None:
-        raise ValueError(f"Table name or Account ID cannot be empty, could not extract from {table_arn}")
-    return table_name, account_id
 
 def extract_table_name_from_record(record):
     value = record['eventSourceARN'].split(':table/')[1].split('/')[0]
@@ -272,7 +277,7 @@ def create_stream_event(item, account_id, export_time, table_name):
         "eventSource": "aws:dynamodbSnapshot",
         "awsRegion": REGION,
         "dynamodb": {
-            "ApproximateCreationDateTime": export_time,
+            "ApproximateCreationDateTime": int(export_time),
             "Keys": keys,
             "NewImage": item['Item'],
             "SequenceNumber": "SNAPSHOT",
@@ -292,9 +297,8 @@ def create_ndjson_records(records):
     ndjson_records = []
 
     for record in records:
-        keys = record["dynamodb"].get("Keys", {})
         extracted_keys = {}
-        for k, v in keys.items():
+        for k, v in record["dynamodb"].get("Keys", {}).items():
             key_name = ddb_name_to_tinybird_name(k, TINYBIRD_KEY_PREFIX)
             if key_name not in key_types:
                 key_types[key_name] = list(v.keys())[0]
@@ -317,9 +321,7 @@ def create_ndjson_records(records):
             **extracted_keys
         }
         ndjson_records.append(ndjson_record)
-        
-    logger.debug(f"Created NDJSON records: {json.dumps(ndjson_records)} with key types: {key_types}")
-
+    
     return ndjson_records, key_types
 
 def normalize_tinybird_endpoint(endpoint):
@@ -446,6 +448,7 @@ def ensure_datasource_exists(full_table_name, key_types):
         raise Exception(f"Tinybird API request to create Datasource failed: {create_response.status} - {error_message}")
     else:
         logger.info(f"Tinybird API response: {create_response.status} - {create_response.data.decode('utf-8')}")
+        set_in_cache(cache_key, "datasource_exists")
 
 def ddb_name_to_tinybird_name(ddb_value, tb_prefix=None):
     # Tinybird requires a Datasource name to start with a letter and contain only lowercase letters, numbers, and underscores
