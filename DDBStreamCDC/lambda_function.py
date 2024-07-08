@@ -36,7 +36,7 @@ TINYBIRD_DS_PREFIX = os.environ.get('TB_DS_PREFIX') or 'ddb_'
 TINYBIRD_SKIP_TABLE_CHECK = os.environ.get('TB_SKIP_TABLE_CHECK', 'False').lower() in ['true', '1', 't', 'yes', 'y']
 TINYBIRD_KEY_PREFIX = os.environ.get('TB_KEY_PREFIX', 'key_')
 BATCH_SIZE = int(os.environ.get('TB_BATCH_SIZE', 250))  # Conservative default
-REGION = os.environ.get('AWS_REGION', 'eu-west-1')
+REGION = os.environ.get('AWS_REGION')
 MAX_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10MB to Tinybird. Max from DDB is about 6Mb.
 MAX_NAME_LENGTH = 128 # Maximum length for a Tinybird Datasource name
 TABLE_KEY_SCHEMAS = {}
@@ -72,6 +72,9 @@ def lambda_handler(event, context):
     try:
         global TINYBIRD_API_KEY
         TINYBIRD_API_KEY = get_tinybird_api_key()
+        # Check Region is set
+        if not REGION:
+            raise ValueError("AWS Region not set in environment variables")
         if 'Records' in event:
             if 's3' in event['Records'][0]:
                 logger.debug(f"Processing event type S3: {json.dumps(event)}")
@@ -185,17 +188,27 @@ def get_snapshot_info_from_manifest(bucket, manifest_key):
     logger.debug(f"Extracted Table ARN: {table_arn}, Export Time: {export_datetime}")
     return table_arn, export_timestamp
 
-def get_manifest_key(bucket, data_file_key):
+def get_manifest_key(bucket, data_file_key, max_retries=5, delay=1):
     manifest_key = '/'.join(data_file_key.split('/')[:-2] + ['manifest-summary.json'])
     logger.debug(f"Checking for manifest file: {manifest_key}")
     
-    # Check if the manifest file exists
-    try:
-        s3.head_object(Bucket=bucket, Key=manifest_key)
-        logger.debug(f"Manifest file found for data file: {data_file_key}")
-        return manifest_key
-    except s3.exceptions.ClientError as e:
-        logger.error(f"Manifest file not found for data file: {data_file_key}: {str(e)}")
+    for attempt in range(max_retries):
+        try:
+            s3.head_object(Bucket=bucket, Key=manifest_key)
+            logger.debug(f"Manifest file found for data file: {data_file_key}")
+            return manifest_key
+        except ClientError as e:
+            if e.response['Error']['Code'] == '404':
+                logger.warning(f"Attempt {attempt + 1}/{max_retries}: Manifest file not found for data file: {data_file_key}")
+                if attempt < max_retries - 1:
+                    time.sleep(delay * (2 ** attempt))  # Exponential backoff
+                continue
+            else:
+                logger.error(f"Error checking for manifest file: {str(e)}")
+                raise
+
+    logger.error(f"Manifest file not found after {max_retries} attempts for data file: {data_file_key}")
+    return None
 
 def get_ddb_table_info_from_arn(table_arn):
     # arn like arn:aws:dynamodb:eu-west-2:819314934727:table/PeopleTable
@@ -383,7 +396,7 @@ def ensure_datasource_exists(full_table_name, key_types):
                 set_in_cache(cache_key, "datasource_exists")
                 return
             else:
-                logger.info(f"Table {full_table_name} does not exist, creating it now")
+                logger.info(f"Table {full_table_name} not found in existing table list {existing_tables}, creating it now")
         except json.JSONDecodeError:
             logger.error("Failed to parse Tinybird API response")
             raise Exception("Failed to parse Tinybird API response")
