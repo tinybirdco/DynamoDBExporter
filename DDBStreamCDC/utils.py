@@ -17,14 +17,19 @@ from decimal import Decimal
 clients = {}
 resources = {}
 
+def set_aws_region(region):
+    global AWS_SESSION, AWS_REGION
+    AWS_REGION = region
+    AWS_SESSION = boto3.Session(region_name=AWS_REGION)
+
 def get_client(service_name):
     if service_name not in clients:
-        clients[service_name] = boto3.client(service_name)
+        clients[service_name] = AWS_SESSION.client(service_name)
     return clients[service_name]
 
 def get_resource(service_name):
     if service_name not in resources:
-        resources[service_name] = boto3.resource(service_name)
+        resources[service_name] = AWS_SESSION.resource(service_name)
     return resources[service_name]
 
 # Lazy initialization for Faker
@@ -39,7 +44,7 @@ def get_fake():
 # Table name and structure
 DEFAULT_TABLE_NAME = "PeopleTable"
 DEFAULT_REGION = "eu-west-2"
-DEFAULT_S3_BUCKET = "tinybird-test-dynamodb-export"
+DEFAULT_S3_BUCKET = "jim-dynamodb-stream"
 DEFAULT_S3_PREFIX = "DDBStreamCDC"
 DEFAULT_LAMBDA_ROLE_NAME = "DDBStreamCDC-LambdaRole"
 DEFAULT_LAMBDA_FUNCTION_NAME = "DDBStreamCDC-LambdaFunction"
@@ -335,7 +340,7 @@ def enable_pitr(table_name, max_retries=5, initial_delay=1):
 
     logger.error(f"Failed to enable PITR after {max_retries} attempts")
 
-def setup_dynamodb_trigger(table_name, lambda_arn, region):
+def setup_dynamodb_trigger(table_name, lambda_arn):
     account_id = get_client('sts').get_caller_identity()["Account"]
 
     try:
@@ -382,7 +387,7 @@ def setup_dynamodb_trigger(table_name, lambda_arn, region):
     try:
         existing_mappings = get_client('lambda').list_event_source_mappings(FunctionName=lambda_arn)['EventSourceMappings']
         for mapping in existing_mappings:
-            if mapping['EventSourceArn'].startswith(f"arn:aws:dynamodb:{region}:{account_id}:table/{table_name}/stream/"):
+            if mapping['EventSourceArn'].startswith(f"arn:aws:dynamodb:{AWS_REGION}:{account_id}:table/{table_name}/stream/"):
                 if mapping['EventSourceArn'] == current_stream_arn:
                     logger.info(f"Correct DynamoDB Stream trigger already exists for Lambda function {lambda_arn}")
                     return
@@ -405,7 +410,7 @@ def setup_dynamodb_trigger(table_name, lambda_arn, region):
 
     logger.info(f"DynamoDB Stream trigger setup complete for table {table_name}")
 
-def remove_dynamodb_trigger(table_name, region):
+def remove_dynamodb_trigger(table_name):
     account_id = get_client('sts').get_caller_identity()["Account"]
     # Get the stream ARN
     try:
@@ -430,7 +435,7 @@ def remove_dynamodb_trigger(table_name, region):
     for page in paginator.paginate():
         for mapping in page['EventSourceMappings']:
             # Check if the mapping is for our table's stream
-            if mapping['EventSourceArn'].startswith(f"arn:aws:dynamodb:{region}:{account_id}:table/{table_name}/stream/"):
+            if mapping['EventSourceArn'].startswith(f"arn:aws:dynamodb:{AWS_REGION}:{account_id}:table/{table_name}/stream/"):
                 try:
                     logger.info(f"Removing DynamoDB Stream trigger {mapping['UUID']} for table {table_name}")
                     get_client('lambda').delete_event_source_mapping(UUID=mapping['UUID'])
@@ -772,9 +777,9 @@ def start_export_to_s3(table_name, s3_bucket, s3_prefix):
     logger.info(f"Starting export to S3 for table: {table_name} to S3 bucket: {s3_bucket}, with prefix: {s3_prefix} in DYNAMODB_JSON format.")
     try:
         response = get_client('dynamodb').export_table_to_point_in_time(
-            TableArn=f"arn:aws:dynamodb:{DEFAULT_REGION}:{get_client('sts').get_caller_identity().get('Account')}:table/{table_name}",
+            TableArn=f"arn:aws:dynamodb:{AWS_REGION}:{get_client('sts').get_caller_identity().get('Account')}:table/{table_name}",
             S3Bucket=s3_bucket,
-            S3Prefix=f"{s3_prefix}/{table_name}",
+            S3Prefix=f"{s3_prefix}",
             ExportType='FULL_EXPORT',
             ExportFormat='DYNAMODB_JSON'
         )
@@ -980,6 +985,51 @@ def create_mv_in_tinybird(mv_info, mv_schema):
     create_mv_read_pipe(mv_info, mv_schema)
     logger.info(f"Materialized View created successfully for table {mv_info['landing_table_name']}")
 
+def check_ddb_table_in_region(table_name):
+    """
+    Check if the specified DynamoDB table exists in the current region.
+    
+    :param table_name: Name of the DynamoDB table
+    :return: True if table exists in current region, False otherwise
+    """
+    try:
+        dynamodb = get_client('dynamodb')
+        dynamodb.describe_table(TableName=table_name)
+        logger.info(f"Table '{table_name}' found in the current region ({AWS_REGION}).")
+        return True
+    except dynamodb.exceptions.ResourceNotFoundException:
+        logger.error(f"Table '{table_name}' not found in the current region ({AWS_REGION}), please check your Region or create the Table before using this function.")
+        return False
+    except Exception as e:
+        logger.error(f"Error checking table '{table_name}' in region {AWS_REGION}: {str(e)}")
+        return False
+
+def check_s3_in_region(bucket_name):
+    """
+    Check if the specified S3 bucket exists in the current region.
+    
+    :param bucket_name: Name of the S3 bucket
+    :return: True if bucket exists in current region, False otherwise
+    """
+    try:
+        s3 = get_client('s3')
+        # Also check if the bucket is in the current region
+        bucket_region = s3.get_bucket_location(Bucket=bucket_name).get('LocationConstraint', AWS_REGION)
+        if bucket_region != AWS_REGION:
+            logger.error(f"Bucket '{bucket_name}' found in a different region ({bucket_region}) than the current region ({AWS_REGION}).")
+            return False
+        logger.info(f"Bucket '{bucket_name}' found in this region ({AWS_REGION}).")
+        return True
+    except s3.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == '404':
+            logger.error(f"Bucket '{bucket_name}' not found in the current region ({AWS_REGION}), please check your Region or create the Bucket before using this function.")
+        else:
+            logger.error(f"Error checking bucket '{bucket_name}' in region {AWS_REGION}: {str(e)}")
+        return False
+    except Exception as e:
+        logger.error(f"Error checking bucket '{bucket_name}' in region {AWS_REGION}: {str(e)}")
+        return False
+
 def manage_infrastructure(args):
     # Use provided values or defaults
     table_name = args.table_name or DEFAULT_TABLE_NAME
@@ -988,7 +1038,6 @@ def manage_infrastructure(args):
     lambda_name = args.lambda_name or DEFAULT_LAMBDA_FUNCTION_NAME
     lambda_role = args.lambda_role or DEFAULT_LAMBDA_ROLE_NAME
     secret_name = args.lambda_secret or DEFAULT_SECRET_NAME
-    region = args.region or DEFAULT_REGION
 
     if args.remove or (args.create and args.overwrite):
         logger.info("Starting infrastructure teardown...")
@@ -1006,7 +1055,7 @@ def manage_infrastructure(args):
             remove_s3_trigger(s3_bucket, lambda_arn)
             
             # 3. Remove DynamoDB Stream trigger
-            remove_dynamodb_trigger(table_name, region)
+            remove_dynamodb_trigger(table_name)
             
             # 4. Remove Lambda function
             remove_lambda_function(lambda_name, lambda_role, secret_name)
@@ -1021,9 +1070,16 @@ def manage_infrastructure(args):
 
     if args.create:
         logger.info("Starting infrastructure setup...")
+        # 0. Check if the s3 bucket exists in the target region
+        if not check_s3_in_region(s3_bucket):
+            logger.error(f"S3 Bucket '{s3_bucket}' not found in the current region, and Lambda/Table/Bucket must be colocated. Skipping further setup.")
+            return
         # 1. Create DynamoDB table
         logger.info("Creating DynamoDB table...")
         _ = manage_table('create', table_name, args.overwrite)
+        if not check_ddb_table_in_region(table_name):
+            logger.error(f"DynamoDB Table '{table_name}' not found in the current region. Skipping further setup.")
+            return
         
         # 2. Create Lambda function
         logger.info("Creating Lambda function with default role and policies...")
@@ -1039,7 +1095,7 @@ def manage_infrastructure(args):
         
         # 3. Set up DynamoDB Stream trigger
         logger.info("Setting up DynamoDB Stream trigger for Lambda...")
-        setup_dynamodb_trigger(table_name, lambda_arn, region)
+        setup_dynamodb_trigger(table_name, lambda_arn)
         
         # 4. Set up S3 trigger
         logger.info("Setting up S3 trigger for Lambda...")
@@ -1048,6 +1104,9 @@ def manage_infrastructure(args):
         # 5. Create Tinybird Materialized View (directed pathway)
         logger.info("Creating Materialized View in Tinybird...")
         mv_info = prepare_mv_info(table_name)
+        if not describe_tinybird_table_schema(mv_info['landing_table_name']):
+            logger.warning("Landing table not yet found in Tinybird. Skipping Materialized View setup.")
+            return
         mv_schema = prepare_mv_schema(mv_info['landing_table_name'], infer=False)
         create_mv_in_tinybird(mv_info, mv_schema)
         
@@ -1088,6 +1147,8 @@ def main():
     parser.add_argument("--lambda-timeout", type=int, default=DEFAULT_LAMBDA_TIMEOUT, metavar="Int", help=f"Timeout in seconds for the Lambda function (default: {DEFAULT_LAMBDA_TIMEOUT})")
 
     args = parser.parse_args()
+    # Set AWS Region for all client connections
+    set_aws_region(args.region)
 
     if args.create or args.remove:
         manage_infrastructure(args)
@@ -1097,18 +1158,27 @@ def main():
             manage_table('remove', args.table_name)
 
         if args.create_ddb_table:
+            if not check_s3_in_region(args.s3_bucket):
+                logger.error(f"S3 Bucket '{args.s3_bucket}' not found in the current region, and Lambda/Table/Bucket must be colocated. Skipping further setup.")
+                return
             table = manage_table('create', args.table_name, args.overwrite, args.lambda_arn if args.overwrite else None)
         else:
             table = get_resource('dynamodb').Table(args.table_name)
 
         if args.remove_ddb_trigger:
-            remove_dynamodb_trigger(args.table_name, args.region)
+            remove_dynamodb_trigger(args.table_name)
 
         if args.create_ddb_trigger:
             if not args.lambda_arn:
                 logger.error("Lambda ARN is required to create a trigger")
             else:
-                setup_dynamodb_trigger(args.table_name, args.lambda_arn, args.region)
+                if not check_s3_in_region(args.s3_bucket):
+                    logger.error(f"S3 Bucket '{args.s3_bucket}' not found in the current region, and Lambda/Table/Bucket must be colocated. Skipping further setup.")
+                    return
+                if not check_ddb_table_in_region(args.table_name):
+                    logger.error(f"DynamoDB Table '{args.table_name}' not found in the current region, Lambda trigger would fail. Skipping trigger setup.")
+                    return
+                setup_dynamodb_trigger(args.table_name, args.lambda_arn)
 
         if args.remove_s3_trigger:
             if not args.lambda_arn or not args.s3_bucket:
@@ -1120,6 +1190,12 @@ def main():
             if not args.lambda_arn or not args.s3_bucket:
                 logger.error("Lambda ARN and S3 bucket must be specified to create an S3 trigger")
             else:
+                if not check_s3_in_region(args.s3_bucket):
+                    logger.error(f"S3 Bucket '{args.s3_bucket}' not found in the current region, and Lambda/Table/Bucket must be colocated. Skipping further setup.")
+                    return
+                if not check_ddb_table_in_region(args.table_name):
+                    logger.error(f"DynamoDB Table '{args.table_name}' not found in the current region, Lambda trigger would fail. Skipping trigger setup.")
+                    return
                 setup_s3_trigger(args.s3_bucket, args.lambda_arn, args.s3_prefix)
 
         if args.upload_batch is not None:
@@ -1144,6 +1220,8 @@ def main():
             else:
                 if not table_has_items(table):
                     logger.info(f"Table {args.table_name} is empty. Skipping export.")
+                if not check_s3_in_region(args.s3_bucket):
+                    logger.warning(f"S3 Bucket '{args.s3_bucket}' not found in the current region, and Lambda/Table/Bucket must be colocated.")
                 export_arn, start_time = start_export_to_s3(args.table_name, args.s3_bucket, args.s3_prefix)
                 if export_arn:
                     monitor_export(export_arn, start_time)
@@ -1171,6 +1249,12 @@ def main():
                     logger.info(f"Lambda function {args.lambda_name} not found to remove.")
 
         if args.create_lambda:
+            if not check_s3_in_region(args.s3_bucket):
+                logger.error(f"S3 Bucket '{args.s3_bucket}' not found in the current region, and Lambda/Table/Bucket must be colocated. Skipping further setup.")
+                return
+            if not check_ddb_table_in_region(args.table_name):
+                logger.warning(f"DynamoDB Table '{args.table_name}' not found in the current region, Lambda triggers require it to be in the same region.")
+                return
             lambda_arn = create_lambda_function(
                 args.lambda_name,
                 'lambda_function.lambda_handler',
