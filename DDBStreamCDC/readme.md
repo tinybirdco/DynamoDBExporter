@@ -19,7 +19,7 @@ This README outlines the process of setting up a Change Data Capture (CDC) syste
 3. We use the exportTime of the Export to S3 Point-in-time Backup from the DynamoDB table to simulate the ApproximateCreationDateTime you get from a DynamoDB Stream CDC event. This should ensure that any changes made after the Snapshot is issued will be applied in order to the destination Tinybird Datasource during deduplication.
 4. Batch sizes are largely configurable in the Lambda Trigger for the number of DDBStreams events to collect in each Trigger, and the amount of time to wait before invoking if enough events haven't arrived. This should give users good control over latency vs cost efficiency during the CDC replication stage of the processing.
 5. We do not automatically index DynamoDB GSIs. This is largely because they are not provided in the Stream event, and it would be an expensive operation to fetch the DynamoDB Table Description for them during every Invocation.
-6. The example Materialized View is deliberately simple to aid education, please see [Tinybird docs](https://www.tinybird.co/docs) or [contact us](hi@tinybird.co) if you want to discuss more complex or high volume use cases.
+6. The example Materialized View is deliberately simple to aid education, please see [Tinybird docs](https://www.tinybird.co/docs/guides/querying-data/deduplication-strategies) or [contact us](hi@tinybird.co) if you want to discuss more complex or high volume use cases.
 7. We use Lambda Triggers to receive and process data from the DynamoDB Stream feature. As of writing this only works if all services are within the same AWS Account and Region.
 
 ## Manual Deployment
@@ -37,20 +37,24 @@ To create the secret:
 3. Select Other Type of Secret
 4. Set the Key as: `TB_CREATE_DS_TOKEN`
 5. Set the Value as the Token from `create datasource token`which you copied from Tinybird; it is usually a long alphanumeric String starting with `p.`
-6. On the next page, name the Secret something like `TinybirdAPIKey-test`. Consider using a meaningful prefix here so that you can easily set it in your Access Policy in later steps, something like `TinybirdAPIKey-` with any suffix would be fine.
+6. On the next page, we suggest you name the Secret something with a meaningful prefix so that you can easily set it in your Access Policy in later steps, like `TinybirdAPIKey-`, so the full Secret name is `TinybirdAPIKey-test`, and in the Access Policy you can permission it with `TinybirdAPIKey-*`
 
 ### 1. Setup DynamoDB Table
-1. Your DynamoDB table needs to be configured with both DDBStreams activated to send changes, and point-in-time recovery to allow Snapshots to be created. The utils script contains functions to help you with this.
-2. DDBStreams should be turned on before you do an initial snapshot, otherwise you may miss any changes between the snapshot completion and streams activation. If you enable DDBStreams when you first create the table you should have no problems.
+1. Your DynamoDB table needs to be configured with both DynamoDB Streams (DDBStreams) activated to send changes, and Point-In-Time-Recovery (PITR) to allow Snapshots to be created. 
+    * You can enable PITR on the 'Backups' tab of an existing DynamoDB Table
+    * You can enable DynamoDB Streams on the 'Exports and streams' tab of an existing DynamoDB Table.
+  2. DDBStreams should be turned on before you do an initial snapshot, otherwise you may miss any changes between the snapshot completion and streams activation. If you enable DDBStreams when you first create the table you should have no problems.
 
 ### 2. Create an S3 Bucket for your Snapshots
 You need an S3 Bucket that the Snapshots can be stored in, it can be a separate bucket just for this purpose, or you can use a prefix in the Snapshot configuration (recommended anyway) to keep the data exports contained to one area of some other bucket. This bucket is not exposed publicly and is only used to get 'free' snapshots from DynamoDB without using a full Scan.
+
+> **Warning:** Your Bucket must be in the same AWS Region and Account as the DynamoDB Table.
 
 1. Create a bucket, retain the name for use in later configurations.
 
 ### 3. Create IAM Policy
 Policy controls are required to allow the Role to take necessary actions within your account.
-You can either use a set of standard AWS Policies, or create your own from the provided template.
+You can either use a set of standard AWS Policies, or create your own limited to the minimum required access from the provided [template](lambda_policy.json).
 
 #### Use default Policies
   * arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole,
@@ -63,7 +67,7 @@ Note that the provided utils script uses the Default AWS policies.
 #### Create your own Policy
 1. Navigate to IAM in the AWS Console.
 2. Create a new Policy for the Lambda.
-3. Use the [provided](DDBStreamCDC/lambda_policy.json) policy JSON as a starting point.
+3. Use the [provided](lambda_policy.json) policy JSON as a starting point.
 4. Update the policy with your specific S3 bucket name.
 5. Update the policy with your Tinybird API Key Secret prefix or name, if using that feature.
 
@@ -76,6 +80,8 @@ Note that the provided utils script uses the Default AWS policies.
 
 ### 5. Create Lambda Function
 
+> **Warning:** Your Lambda must be in the same AWS Region and Account as the DynamoDB Table and S3 Bucket.
+
 1. Go to AWS Lambda and create a new function.
 2. Select 'Author from Scratch' option
 2. Name it something memorable, such as "TinybirdDynamoCDC".
@@ -83,14 +89,14 @@ Note that the provided utils script uses the Default AWS policies.
 4. Set the architecture to x86_64.
 5. Set the timeout to 5 minutes.
 6. Assign the IAM role created in step 1.
-7. Use the code from TinyDynamoCDC.py for the function.
+7. Use the code from [lambda_function.py](lambda_function.py) for the function.
 8. Deploy the function.
 
 #### Configure Environment Variables
 In the Lambda configuration, add these environment variables:
 
 ##### Required
-The Lambda requires a Tinybird Token to push the data into your Workspace. It requires the `DATASOURCE:APPEND` and `DATASOURCE:CREATE` scopes. By default the `create datasource token` in Tinybird has these scopes already.
+The Lambda requires a Tinybird Token [(Docs)](https://www.tinybird.co/docs/concepts/auth-tokens) to push the data into your Workspace. It requires the `DATASOURCE:APPEND` and `DATASOURCE:CREATE` scopes. By default the `create datasource token` in Tinybird has these scopes already.
 You have two options:
 * TB_CREATE_DS_TOKEN: Set this environment variable with the Token directly if you wish. This will override the Secret option below if set. 
 
@@ -101,9 +107,9 @@ You have two options:
 1. TB_DS_PREFIX: The prefix to apply to the DynamoDB table names when creating them in Tinybird, it defaults to `ddb_`
 2. TB_API_ENDPOINT: The URL of your Tinybird Workspace, if different than the default. You can easily find this in the Add Datasource > Events API example in the UI. It defaults to `https://api.tinybird.co/v0/`
 3. TB_SKIP_TABLE_CHECK: You can set this to True if you want the script to skip checking if the target Tinybird Datasource already exists. The script will create it with a good schema by default, but once it's running you may want to set this to skip the extra API call every invocation.
-4. BATCH_SIZE: This sets the number of records to be micro-batched and sent to Tinybird. It defaults to 250 which is very conservative.
+4. BATCH_SIZE: This sets the number of records to be micro-batched and sent to Tinybird. It conservatively defaults to 250.
 5. MAX_PAYLOAD_SIZE: Set this to control the maximum payload size sent to Tinybird. It defaults to 10Mb.
-6. REGION: Set this to override the AWS Region used for processing if necessary.
+6. REGION: Set this to override the AWS Region used for processing, if necessary. It defaults to the execution region of the Lambda.
 7. LOGGING_LEVEL: Controls the detailed logging level of the Lambda. Defaults to `INFO`, can be set to `DEBUG` for more verbosity.
 8. TB_CREATE_DS_TOKEN_SECRET_KEY_NAME: You can use this to override the name of the Key in the AWS Secret Manager that stores the Tinybird API Token. Defaults to `TB_CREATE_DS_TOKEN`.
 
