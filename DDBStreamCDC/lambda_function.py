@@ -75,7 +75,7 @@ def lambda_handler(event, context):
         # Check Region is set
         if not REGION:
             raise ValueError("AWS Region not set in environment variables")
-        if 'Records' in event:
+        if 'Records' in event and event['Records']:
             if 's3' in event['Records'][0]:
                 logger.debug(f"Processing event type S3: {json.dumps(event)}")
                 s3_conditional_setup()
@@ -84,7 +84,7 @@ def lambda_handler(event, context):
                 logger.debug(f"Processing event type DDBStream: {json.dumps(event)}")
                 process_dynamodb_stream_event(event)
             else:
-                logger.error("Unsupported event type")
+                logger.error("Unsupported event type, Records was empty or did not contain S3 or DynamoDB events")
                 raise ValueError("Unsupported event type")
         return {"statusCode": 200, "body": json.dumps("Processing complete")}
     except Exception as e:
