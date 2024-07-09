@@ -23,11 +23,13 @@
             "Resource": "arn:aws:dynamodb:*:*:table/*/stream/*"
         },
         {
-            "Effect": "Allow",
-            "Action": [
-                "dynamodb:DescribeTable"
-            ],
-            "Resource": "arn:aws:dynamodb:*:*:table/*"
+	    "Effect": "Allow",
+	    "Action": [
+		    "dynamodb:DescribeTable",
+		    "dynamodb:ListExports",
+		    "dynamodb:DescribeExport"
+	    ],
+	    "Resource": "arn:aws:dynamodb:*:*:table/*"
         },
         {
             "Effect": "Allow",
