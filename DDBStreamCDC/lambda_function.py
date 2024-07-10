@@ -445,7 +445,11 @@ def ensure_datasource_exists(full_table_name, key_types):
     create_response = call_tinybird("POST", "datasources", params)
     if create_response.status >= 400:
         error_message = create_response.data.decode('utf-8')
-        raise Exception(f"Tinybird API request to create Datasource failed: {create_response.status} - {error_message}")
+        if "already exists" in error_message:
+            logger.debug(f"Datasource {full_table_name} already exists")
+            set_in_cache(cache_key, "datasource_exists")
+        else:
+            raise Exception(f"Tinybird API request to create Datasource failed: {create_response.status} - {error_message}")
     else:
         logger.info(f"Tinybird API response: {create_response.status} - {create_response.data.decode('utf-8')}")
         set_in_cache(cache_key, "datasource_exists")
