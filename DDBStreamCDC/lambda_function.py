@@ -7,7 +7,7 @@ import base64
 import re
 
 import boto3
-from boto3.dynamodb.types import TypeDeserializer, Binary
+from boto3.dynamodb.types import Binary
 from botocore.exceptions import ClientError
 import urllib3
 from urllib.parse import urlencode, urljoin
@@ -28,8 +28,6 @@ def s3_conditional_setup():
 # Setup Logging
 logger = getLogger('DDBStreamCDC')
 logger.setLevel(os.environ.get("LOGGING_LEVEL") or INFO)
-
-deserializer = TypeDeserializer()
 
 TINYBIRD_API_KEY_FROM_ENV = os.environ.get('TB_CREATE_DS_TOKEN')  # DATASOURCE:CREATE and DATASOURCE:APPEND permissions
 TINYBIRD_API_KEY_FROM_SECRET = os.environ.get('TB_CREATE_DS_TOKEN_SECRET_NAME')
@@ -62,12 +60,26 @@ def set_in_cache(key, value):
 class DDBEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(o, Decimal):
+            # Using float for consistency in ClickHouse Types
             return float(o)
         elif isinstance(o, Binary):
             # DynamoDB stream base64-encodes all binary types, must base64 decode first
             return base64.b64encode(o.value).decode('utf-8')
         elif isinstance(o, bytes):
             return base64.b64encode(o).decode('utf-8')
+        elif isinstance(o, set):
+            if all(isinstance(i, Binary) for i in o):
+                # Handle Binary Set
+                return [base64.b64encode(i.value).decode('utf-8') for i in o]
+            else:
+                # Handle other sets (String Set, Number Set)
+                return list(o)
+        elif isinstance(o, float):
+            # Keep floats as floats
+            return o
+        elif hasattr(o, 'serialize'):
+            # For DynamoDB AttributeValue types
+            return o.serialize()
         return super().default(o)
 
 def lambda_handler(event, context):
@@ -238,16 +250,45 @@ def process_dynamodb_stream_event(event):
         logger.info("No records to process")
 
 def from_dynamodb_to_json(item):
-    return {k: __deserialize(v) for k, v in item.items()}
+    return deserialize_dynamodb_item(item)
 
-def __deserialize(value):
-    dynamodb_type = list(value.keys())[0]
-    
-    # DynamoDB stream base64-encodes all binary types, must base64 decode first for consistency
-    if dynamodb_type == "B" and isinstance(value["B"], str):
-        value = {"B": base64.b64decode(value["B"])}
-    
-    return deserializer.deserialize(value)
+def decode_binary(value):
+    if isinstance(value, str):
+        return base64.b64decode(value)
+    elif isinstance(value, (bytes, bytearray)):
+        return value
+    else:
+        raise ValueError(f"Unexpected type for Binary value: {type(value)}")
+
+def deserialize_dynamodb_item(item):
+    def deserialize_value(value):
+        if isinstance(value, dict):
+            if 'B' in value:
+                return Binary(decode_binary(value['B']))
+            elif 'BS' in value:
+                return set(Binary(decode_binary(v)) for v in value['BS'])
+            elif 'N' in value:
+                return Decimal(value['N'])
+            elif 'NS' in value:
+                return set(Decimal(v) for v in value['NS'])
+            elif 'S' in value:
+                return value['S']
+            elif 'SS' in value:
+                return set(value['SS'])
+            elif 'BOOL' in value:
+                return value['BOOL']
+            elif 'NULL' in value:
+                return None
+            elif 'L' in value:
+                return [deserialize_value(v) for v in value['L']]
+            elif 'M' in value:
+                return deserialize_dynamodb_item(value['M'])
+            else:
+                raise ValueError(f"Unknown DynamoDB type: {value}")
+        else:
+            return value
+
+    return {k: deserialize_value(v) for k, v in item.items()}
 
 def get_ddb_table_schema(table_name):
     """Used for the S3 pathway to get Key information for generating the events."""
@@ -302,7 +343,7 @@ def create_ndjson_records(records):
             key_name = ddb_name_to_tinybird_name(k, TINYBIRD_KEY_PREFIX)
             if key_name not in key_types:
                 key_types[key_name] = list(v.keys())[0]
-            extracted_keys[key_name] = __deserialize(v)
+            extracted_keys[key_name] = from_dynamodb_to_json({k: v})[k]
 
         ndjson_record = {
             "eventID": record["eventID"],
