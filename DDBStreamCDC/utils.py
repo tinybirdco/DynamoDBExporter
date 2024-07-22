@@ -1,12 +1,13 @@
 import boto3
 import io
 import json
-from os import path, walk
+from os import path, urandom
 import random
 import string
 import requests
 import argparse
 from botocore.exceptions import ClientError
+from boto3.dynamodb.types import Binary
 import logging
 import time
 import zipfile
@@ -631,37 +632,74 @@ def maybe_empty_list(chance_of_empty=0.1):
     return [] if random.random() < chance_of_empty else [get_fake().word() for _ in range(random.randint(1, 5))]
 
 def generate_fake_person():
+    fake = get_fake()
+    
+    def maybe_none(chance_of_none=0.1):
+        return None if random.random() < chance_of_none else True
+
+    def generate_binary_data():
+        return Binary(b'\x00\x01' + urandom(random.randint(10, 20)))
+
     person = {
         'UserId': generate_user_id(),
-        'Email': get_fake().email(),
-        'LastName': get_fake().last_name(),  # Ensure LastName is always present for the GSI
-        'FirstName': get_fake().first_name() if maybe_none() else None,
+        'Email': fake.email(),
+        'LastName': fake.last_name(),
+        'FirstName': fake.first_name() if maybe_none() else None,
         'Age': random.randint(18, 90) if maybe_none() else None,
         'Address': {
-            'Street': get_fake().street_address() if maybe_none() else None,
-            'City': get_fake().city() if maybe_none() else None,
-            'ZipCode': get_fake().zipcode() if maybe_none() else None
+            'Street': fake.street_address() if maybe_none() else None,
+            'City': fake.city() if maybe_none() else None,
+            'State': fake.state_abbr() if maybe_none() else None,
+            'ZipCode': fake.zipcode() if maybe_none() else None,
+            'Country': fake.country() if maybe_none() else None
         } if maybe_none() else None,
-        'PhoneNumber': get_fake().phone_number() if maybe_none() else None,
-        'Salary': Decimal(str(round(random.uniform(20000, 150000), 2))) if maybe_none() else None,
+        'PhoneNumber': fake.phone_number() if maybe_none() else None,
+        'Salary': Decimal(str(random.randint(20000, 150000))) if maybe_none() else None,
         'IsEmployed': random.choice([True, False, None]),
-        'Hobbies': maybe_empty_list(),
+        'Hobbies': set(fake.words(nb=random.randint(1, 5))) if maybe_none() else None,
         'Score': random.randint(0, 100) if maybe_none() else None,
-        'DecimalValue': Decimal(str(round(random.uniform(0, 1), 4))) if maybe_none() else None,
-        'BinaryData': b'binary data' if maybe_none() else None,
-        'ListOfDicts': [
-            {'Key': get_fake().word(), 'Value': random.randint(1, 100)}
-            for _ in range(random.randint(0, 3))
-        ],
-        'DictWithList': {
-            'ListKey': maybe_empty_list(),
-            'OtherKey': random.randint(1, 10) if maybe_none() else None
+        'DecimalValue': Decimal(str(random.randint(1, 10000)) + "." + str(random.randint(0, 9999)).zfill(4)) if maybe_none() else None,
+        'BinaryData': generate_binary_data() if maybe_none() else None,
+        'DateJoined': fake.date_time_this_decade().isoformat() if maybe_none() else None,
+        'Tags': set(fake.words(nb=random.randint(1, 5))),
+        'Preferences': {
+            'Theme': random.choice(['Light', 'Dark', 'System']),
+            'Notifications': random.choice([True, False]),
+            'Language': fake.language_code()
         } if maybe_none() else None,
-        'NullableRange': {
-            'Min': random.randint(1, 50) if maybe_none() else None,
-            'Max': random.randint(51, 100) if maybe_none() else None
-        } if maybe_none() else None
+        'PerformanceRatings': [random.randint(1, 5) for _ in range(random.randint(0, 5))],
+        'LastLogin': Decimal(str(int(time.time()))) if maybe_none() else None,
+        'AccountStatus': random.choice(['Active', 'Inactive', 'Suspended', None]),
+        'EmergencyContact': {
+            'Name': fake.name(),
+            'Relationship': fake.word(),
+            'Phone': fake.phone_number()
+        } if maybe_none(0.7) else None,
+        'NullField': None,
+        'EmptyString': '' if maybe_none(0.3) else fake.word(),
+        'LargeNumber': Decimal(str(random.randint(1000000, 9999999999))) if maybe_none() else None,
+        'SmallNumber': Decimal(str(random.randint(1, 1000)) + "." + str(random.randint(0, 9999)).zfill(4)) if maybe_none() else None,
+        'BooleanList': [random.choice([True, False]) for _ in range(random.randint(0, 5))],
+        'MixedTypeList': [
+            random.choice([
+                fake.word(),
+                Decimal(str(random.randint(1, 100))),
+                random.choice([True, False]),
+                None
+            ]) for _ in range(random.randint(0, 5))
+        ],
+        'NestedStructure': {
+            'Level1': {
+                'Level2': {
+                    'Level3': fake.sentence() if maybe_none() else None
+                } if maybe_none() else None
+            } if maybe_none() else None
+        } if maybe_none() else None,
+        'Interests': set(fake.words(nb=random.randint(1, 5))) if maybe_none() else None,  # String Set
+        'LuckyNumbers': set(Decimal(str(random.randint(1, 100))) for _ in range(random.randint(1, 5))) if maybe_none() else None,  # Number Set
+        'Certificates': set(generate_binary_data() for _ in range(random.randint(1, 3))) if maybe_none() else None,  # Binary Set
     }
+    
     # Remove any top-level null values
     return {k: v for k, v in person.items() if v is not None}
 

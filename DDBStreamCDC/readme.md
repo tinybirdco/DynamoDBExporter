@@ -215,3 +215,7 @@ There are many functions to aid in this in the provided utils.py script
 * Check Lambda function logs in CloudWatch for detailed error messages.
 * Ensure all IAM permissions are correctly set.
 * Verify that the Tinybird API token has the necessary permissions.
+* You can only have one Lambda notification on the S3 bucket of this type, so if you delete the Lambda be sure to clean up the triggers.
+* There are two processing pathways; one for S3 and the other for DDBStreams:
+  * S3 processing produces rows with the `eventName` of `SNAPSHOT`, You can search the logs for the statements `Processing event type S3`.
+  * DDBStreams Lambda invocations are logged with `Processing event type DDBStream`, and produce `eventName` of `INSERT`, `MODIFY`, and `REMOVE`.
