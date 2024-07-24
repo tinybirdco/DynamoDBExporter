@@ -215,7 +215,7 @@ def process_export_file(bucket, key):
                 event = create_stream_event(item, account_id, export_time, table_name)
                 ndjson_records, new_key_types = create_ndjson_records([event])
                 key_types.update(new_key_types)
-                event_size = len(json.dumps(ndjson_records[0]))
+                event_size = len(json.dumps(ndjson_records[0], cls=DDBEncoder))
                 batch += ndjson_records
                 
                 if len(batch) >= BATCH_SIZE or batch_size + event_size > MAX_PAYLOAD_SIZE:
